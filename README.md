@@ -13,7 +13,7 @@
 | `we-core` | готово, тесты зелёные; проверено на реальных данных: 19 стандартных проектов WE и 7 обоев из Workshop (`wpe-gallery scan -v <каталог>` — тип, свойства, проблемы) |
 | `wpe-daemon --features gtk` | этап 1 готов: видео (loop, без звука, cover) и web (WebKitGTK 6 + шим API WE: свойства, курсор/клики, пауза, аудио-API), окно на монитор, hotplug |
 | `wpe-daemon` без `gtk` | headless: D-Bus, каталог, state — для разработки GUI/расширения |
-| `wpe-gallery` | CLI (`list/scan/add-dir/set/props/prop/volume`); GUI — этап 3 |
+| `wpe-gallery` | без аргументов — GTK4/libadwaita GUI «Живые обои» (сетка превью, поиск/фильтр/сортировка, выбор монитора, свойства из project.json, настройки FPS/звука/каталогов, серые неподдерживаемые; [скриншот](docs/screenshots/gallery-grid.png)); с аргументами — CLI (`list/scan/add-dir/set/props/prop/volume`) |
 | `gnome-extension` | готово: окно рендерера → фон под всеми окнами (и в обзоре), скрыто из обзора/alt-tab/дока, курсор/клики с пустого рабочего стола (и поверх DING), пауза при maximized/fullscreen и блокировке |
 | сцены | этап 2 готов: linux-wallpaperengine (наш патч `--control-stdin`) в окне, найденном по PID, фоном; курсор/параллакс, пауза, свойства, FPS (`wpe-gallery fps 30`), звук выключен по умолчанию |
 | аудиоспектр, GUI-галерея | этап 3 |
@@ -50,7 +50,8 @@ Rust — через rustup (без sudo): `curl https://sh.rustup.rs -sSf | sh`.
 cargo test --workspace                        # we-core + headless daemon
 node scripts/test-shim.mjs                    # JS-шим API Wallpaper Engine
 cargo build --release -p wpe-daemon --features gtk
-cargo build --release -p wpe-gallery
+cargo build --release -p wpe-gallery --features gtk   # без --features gtk — только CLI
+WPE_GUI=1 scripts/nested-test.sh              # GUI галереи в nested-сессии: /tmp/wpe-nested/gui-*.png (WPE_GUI_ACTIONS — действия rd-probe; OUT и WPE_NESTED_DISPLAY разводят параллельные запуски)
 scripts/nested-test.sh                        # интеграционный тест в отдельной headless GNOME Shell
 WPE_SHELL_MODE=ubuntu WPE_MONITORS="1280x720 1024x768" scripts/nested-test.sh
 WPE_SCENES="beach 3582604159" scripts/nested-test.sh  # сцены: скриншоты, FPS, CPU/GPU, курсор, пауза, свойства

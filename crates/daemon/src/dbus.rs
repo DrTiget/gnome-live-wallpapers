@@ -46,7 +46,7 @@ fn err(e: String) -> fdo::Error {
 
 #[interface(name = "io.github.wpe.Daemon1")]
 impl Service {
-    /// JSON array of wallpapers: [{id,title,type,supported,preview,root,tags,audio,rating}].
+    /// JSON array of wallpapers: [{id,title,type,supported,status(ok|unsupported|broken),reason,preview,root,tags,audio,rating}].
     fn list_wallpapers(&self) -> String {
         self.core.lock().unwrap().list_json()
     }
@@ -104,7 +104,27 @@ impl Service {
 
     /// From the GNOME extension: monitor covered by fullscreen/maximized window.
     fn set_paused(&self, monitor: &str, paused: bool) {
-        self.core.lock().unwrap().renderer.handle(RenderCmd::Pause { monitor: monitor.into(), paused });
+        let mut c = self.core.lock().unwrap();
+        if paused && !c.state.pause_on_maximized {
+            return;
+        }
+        c.renderer.handle(RenderCmd::Pause { monitor: monitor.into(), paused });
+    }
+
+    /// JSON {fps, volume, muted, pause_on_maximized, monitors, directories}.
+    fn get_settings(&self) -> String {
+        self.core.lock().unwrap().settings_json()
+    }
+
+    fn set_pause_on_maximized(&self, on: bool) {
+        self.core.lock().unwrap().set_pause_on_maximized(on);
+    }
+
+    /// Remove a directory added with AddDirectory and rescan.
+    async fn remove_directory(&self, path: &str, #[zbus(signal_emitter)] em: SignalEmitter<'_>) -> fdo::Result<()> {
+        self.core.lock().unwrap().remove_directory(path.into());
+        Self::catalog_changed(&em).await?;
+        Ok(())
     }
 
     fn set_volume(&self, volume: f64, muted: bool) {

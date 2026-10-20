@@ -21,7 +21,7 @@ fi
 # Desktop Icons NG needs the real XDG user dirs (~/Desktop location).
 [ -f "$HOME/.config/user-dirs.dirs" ] && mkdir -p "$XDG_CONFIG_HOME" && cp "$HOME/.config/user-dirs.dirs" "$XDG_CONFIG_HOME/"
 [ "${WPE_SHELL_MODE:-}" = ubuntu ] && export XDG_CURRENT_DESKTOP=ubuntu:GNOME XDG_SESSION_DESKTOP=ubuntu
-export WAYLAND_DISPLAY=wpe-nested-0
+export WAYLAND_DISPLAY=${WPE_NESTED_DISPLAY:-wpe-nested-0}
 unset DISPLAY
 mkdir -p "$XDG_DATA_HOME/gnome-shell/extensions"
 cp -r "$REAL_DATA/gnome-shell/extensions/wpe@wpe.github.io" "$XDG_DATA_HOME/gnome-shell/extensions/"  # shell ignores symlinks
@@ -79,6 +79,17 @@ if [ -n "${WPE_SCENES:-}" ]; then
             echo "fps limit 15 (new pid $(renderer_pid)):"; python3 scripts/rd-probe.py "$OUT/scene-$ID-" fps:4
             python3 scripts/proc-usage.py "$(renderer_pid)" 4
             $G fps 30
+# WPE_GUI=1 — gallery GUI in the nested session: screenshots $OUT/gui-*.png.
+# WPE_GUI_ACTIONS — extra rd-probe actions (e.g. "click:300,300 sleep:1 shot:sel").
+if [ -n "${WPE_GUI:-}" ]; then
+    GDK_BACKEND=wayland ./target/release/wpe-gallery > "$OUT/gui.log" 2>&1 &
+    GUI_PID=$!
+    sleep 4
+    python3 scripts/rd-probe.py "$OUT/gui-" shot:1-grid ${WPE_GUI_ACTIONS:-}
+    kill $GUI_PID; kill $DAEMON_PID; sleep 1; kill $SHELL_PID; wait
+    exit 0
+fi
+
             KEY=$($G props "$ID" | python3 -c 'import json,sys; p=[x for x in json.load(sys.stdin) if x["kind"]["type"]=="color"]; print(p[0]["key"] if p else "")')
             if [ -n "$KEY" ]; then
                 $G prop "$ID" "$KEY" '"1 0 0"'; sleep "${WPE_SCENE_WAIT:-12}"

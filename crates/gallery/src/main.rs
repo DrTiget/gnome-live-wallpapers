@@ -1,6 +1,8 @@
-//! Gallery. Stage 1: CLI over the daemon's D-Bus API (works without GTK).
-//! Stage 3: libadwaita UI (feature `gtk`) — grid of previews, per-monitor
-//! selection, property editor generated from we_core::PropertyKind.
+//! Gallery: without arguments — libadwaita UI (feature `gtk`, see gui.rs),
+//! with arguments — CLI over the daemon's D-Bus API (works without GTK).
+
+#[cfg(feature = "gtk")]
+mod gui;
 
 use zbus::blocking::{Connection, Proxy};
 
@@ -12,6 +14,10 @@ fn proxy(conn: &Connection) -> zbus::Result<Proxy<'_>> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(feature = "gtk")]
+    if args.is_empty() {
+        std::process::exit(gui::run());
+    }
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     match a.as_slice() {
         // Offline: scan a directory directly with we-core.

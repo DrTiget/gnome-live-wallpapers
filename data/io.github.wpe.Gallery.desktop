@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Живые обои
+Name[en]=Live Wallpapers
+Comment=Галерея живых обоев: видео, web и сцены Wallpaper Engine
+Exec=wpe-gallery
+Icon=io.github.wpe.Gallery
+Terminal=false
+Categories=GNOME;GTK;Settings;DesktopSettings;
+Keywords=обои;живые;wallpaper;wallpaper engine;
+StartupNotify=true
+StartupWMClass=io.github.wpe.Gallery

@@ -3,7 +3,24 @@
 use crate::state::State;
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
-use we_core::{Catalog, Project, ProjectType};
+use we_core::{Catalog, Project, ProjectType, ValidationIssue};
+
+/// ("ok" | "unsupported" | "broken", human-readable reason) for the GUI.
+trait Status {
+    fn status(&self) -> (&'static str, String);
+}
+impl Status for Project {
+    fn status(&self) -> (&'static str, String) {
+        if !self.kind.is_supported() {
+            return ("unsupported", format!("тип «{}» не поддерживается", self.kind.as_str()));
+        }
+        let fatal = self.validate().into_iter().find(|i| !matches!(i, ValidationIssue::PreviewNotFound(_)));
+        match fatal {
+            Some(i) => ("broken", format!("{i:?}")),
+            None => ("ok", String::new()),
+        }
+    }
+}
 
 /// Commands the core sends to the active renderer backend.
 #[derive(Debug, Clone, PartialEq)]
@@ -121,15 +138,43 @@ impl Core {
             .projects
             .iter()
             .map(|p| {
+                let (status, reason) = p.status();
                 json!({
                     "id": p.id(), "title": p.title, "type": p.kind.as_str(),
                     "supported": p.kind.is_supported(),
                     "preview": p.preview_path(), "root": p.root, "tags": p.tags,
                     "audio": p.supports_audio, "rating": p.content_rating,
+                    "status": status, "reason": reason,
                 })
             })
             .collect();
         Value::Array(items).to_string()
+    }
+
+    /// Settings for the GUI: {fps, volume, muted, pause_on_maximized, monitors, directories}.
+    pub fn settings_json(&self) -> String {
+        json!({
+            "fps": self.state.fps, "volume": self.state.volume, "muted": self.state.muted,
+            "pause_on_maximized": self.state.pause_on_maximized,
+            "monitors": self.monitors, "directories": self.state.extra_dirs,
+        })
+        .to_string()
+    }
+
+    pub fn remove_directory(&mut self, dir: PathBuf) {
+        self.state.extra_dirs.retain(|d| d != &dir);
+        self.persist();
+        self.rescan();
+    }
+
+    pub fn set_pause_on_maximized(&mut self, on: bool) {
+        self.state.pause_on_maximized = on;
+        self.persist();
+        if !on {
+            for m in self.monitors.clone() {
+                self.renderer.handle(RenderCmd::Pause { monitor: m, paused: false });
+            }
+        }
     }
 
     fn persist(&self) {

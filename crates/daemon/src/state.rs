@@ -26,6 +26,13 @@ pub struct State {
     /// Frame rate limit for scene wallpapers (linux-wallpaperengine `--fps`).
     #[serde(default = "default_fps")]
     pub fps: u32,
+    /// Pause wallpapers while a maximized/fullscreen window covers the monitor.
+    #[serde(default = "default_true")]
+    pub pause_on_maximized: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_volume() -> f64 {
@@ -55,7 +62,7 @@ impl State {
         std::fs::read(path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_else(|| State { volume: default_volume(), muted: default_muted(), fps: default_fps(), ..Default::default() })
+            .unwrap_or_else(|| State { volume: default_volume(), muted: default_muted(), fps: default_fps(), pause_on_maximized: true, ..Default::default() })
     }
 
     /// Atomic write (tmp + rename).

@@ -10,11 +10,13 @@ cd "$(dirname "$0")/.."
 UUID=wpe@wpe.github.io
 BIN=$HOME/.local/bin
 EXT=${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/$UUID
+APPS=${XDG_DATA_HOME:-$HOME/.local/share}/applications
+ICONS=${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps
 UNIT=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/wpe-daemon.service
 
 if [ "${1:-}" = --uninstall ]; then
     systemctl --user disable --now wpe-daemon.service 2>/dev/null || true
-    rm -f "$UNIT" "$BIN/wpe-daemon" "$BIN/wpe-gallery"
+    rm -f "$UNIT" "$BIN/wpe-daemon" "$BIN/wpe-gallery" "$APPS/io.github.wpe.Gallery.desktop" "$ICONS/io.github.wpe.Gallery.svg"
     gnome-extensions disable "$UUID" 2>/dev/null || true
     rm -rf "$EXT"
     systemctl --user daemon-reload
@@ -24,10 +26,14 @@ fi
 
 CARGO=${CARGO:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}
 "$CARGO" build --release -p wpe-daemon --features gtk
-"$CARGO" build --release -p wpe-gallery
+"$CARGO" build --release -p wpe-gallery --features gtk
 
 install -Dm755 target/release/wpe-daemon "$BIN/wpe-daemon"
 install -Dm755 target/release/wpe-gallery "$BIN/wpe-gallery"
+install -Dm644 data/io.github.wpe.Gallery.desktop "$APPS/io.github.wpe.Gallery.desktop"
+install -Dm644 data/io.github.wpe.Gallery.svg "$ICONS/io.github.wpe.Gallery.svg"
+update-desktop-database "$APPS" 2>/dev/null || true
+gtk-update-icon-cache -q -t "${ICONS%/scalable/apps}" 2>/dev/null || true
 install -Dm644 data/wpe-daemon.service "$UNIT"
 rm -rf "$EXT"
 mkdir -p "$(dirname "$EXT")"
