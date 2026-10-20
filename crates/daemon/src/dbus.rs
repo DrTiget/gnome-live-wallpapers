@@ -44,6 +44,29 @@ pub fn emit_catalog_changed() {
     }
 }
 
+fn emit(signal: &str) {
+    if let Some(conn) = CONNECTION.get() {
+        let _ = conn.emit_signal(None::<&str>, OBJECT_PATH, INTERFACE, signal, &());
+    }
+}
+
+/// Playlist timer: once a second advances the countdowns, announces changes.
+pub fn spawn_playlist_timer(core: Arc<Mutex<Core>>) {
+    std::thread::spawn(move || {
+        let mut last = std::time::Instant::now();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let now = std::time::Instant::now();
+            let dt = now.duration_since(last).as_secs_f64();
+            last = now;
+            let changed = core.lock().unwrap().playlist_tick(dt);
+            if !changed.is_empty() {
+                emit("AssignmentsChanged");
+            }
+        }
+    });
+}
+
 pub struct Service {
     pub core: Arc<Mutex<Core>>,
 }
@@ -174,6 +197,68 @@ impl Service {
         RENDERER_PIDS.lock().unwrap().clone().into_iter().collect()
     }
 
+    /// JSON [{id,name,builtin,items}]; "favorites" comes first.
+    fn get_collections(&self) -> String {
+        self.core.lock().unwrap().collections_json()
+    }
+
+    async fn set_favorite(&self, wallpaper_id: &str, on: bool, #[zbus(signal_emitter)] em: SignalEmitter<'_>) -> fdo::Result<()> {
+        self.core.lock().unwrap().set_favorite(wallpaper_id, on);
+        Self::collections_changed(&em).await?;
+        Ok(())
+    }
+
+    async fn create_collection(&self, name: &str, #[zbus(signal_emitter)] em: SignalEmitter<'_>) -> fdo::Result<String> {
+        let id = self.core.lock().unwrap().create_collection(name);
+        Self::collections_changed(&em).await?;
+        Ok(id)
+    }
+
+    async fn rename_collection(&self, id: &str, name: &str, #[zbus(signal_emitter)] em: SignalEmitter<'_>) -> fdo::Result<()> {
+        self.core.lock().unwrap().rename_collection(id, name).map_err(err)?;
+        Self::collections_changed(&em).await?;
+        Ok(())
+    }
+
+    async fn delete_collection(&self, id: &str, #[zbus(signal_emitter)] em: SignalEmitter<'_>) -> fdo::Result<()> {
+        self.core.lock().unwrap().delete_collection(id).map_err(err)?;
+        Self::collections_changed(&em).await?;
+        Ok(())
+    }
+
+    async fn add_to_collection(&self, collection_id: &str, wallpaper_id: &str, #[zbus(signal_emitter)] em: SignalEmitter<'_>) -> fdo::Result<()> {
+        self.core.lock().unwrap().add_to_collection(collection_id, wallpaper_id).map_err(err)?;
+        Self::collections_changed(&em).await?;
+        Ok(())
+    }
+
+    async fn remove_from_collection(&self, collection_id: &str, wallpaper_id: &str, #[zbus(signal_emitter)] em: SignalEmitter<'_>) -> fdo::Result<()> {
+        self.core.lock().unwrap().remove_from_collection(collection_id, wallpaper_id).map_err(err)?;
+        Self::collections_changed(&em).await?;
+        Ok(())
+    }
+
+    /// JSON {enabled, source: all|favorites|<collection id>, interval_min, order: shuffle|sequential, sync_monitors}.
+    fn get_playlist(&self, monitor: &str) -> String {
+        self.core.lock().unwrap().playlist_json(monitor)
+    }
+
+    /// `monitor` "*" = all monitors.
+    async fn set_playlist(&self, monitor: &str, json: &str, #[zbus(signal_emitter)] em: SignalEmitter<'_>) -> fdo::Result<()> {
+        self.core.lock().unwrap().set_playlist(monitor, json).map_err(err)?;
+        Self::playlist_changed(&em, monitor).await?;
+        Ok(())
+    }
+
+    /// Switch to the next wallpaper of the playlist now ("*" = all monitors).
+    async fn next_wallpaper(&self, monitor: &str, #[zbus(signal_emitter)] em: SignalEmitter<'_>) -> fdo::Result<()> {
+        let changed = self.core.lock().unwrap().next_wallpaper(monitor);
+        if !changed.is_empty() {
+            Self::assignments_changed(&em).await?;
+        }
+        Ok(())
+    }
+
     #[zbus(property)]
     fn version(&self) -> String {
         env!("CARGO_PKG_VERSION").into()
@@ -185,6 +270,10 @@ impl Service {
     async fn assignments_changed(em: &SignalEmitter<'_>) -> zbus::Result<()>;
     #[zbus(signal)]
     async fn properties_changed(em: &SignalEmitter<'_>, id: &str) -> zbus::Result<()>;
+    #[zbus(signal)]
+    async fn collections_changed(em: &SignalEmitter<'_>) -> zbus::Result<()>;
+    #[zbus(signal)]
+    async fn playlist_changed(em: &SignalEmitter<'_>, monitor: &str) -> zbus::Result<()>;
     #[zbus(signal)]
     async fn renderer_pids_changed(em: &SignalEmitter<'_>) -> zbus::Result<()>;
 }

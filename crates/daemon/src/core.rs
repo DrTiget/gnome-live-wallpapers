@@ -1,6 +1,6 @@
 //! Renderer-independent daemon logic: catalog + state + commands to renderer.
 
-use crate::state::State;
+use crate::state::{Playlist, State};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -96,13 +96,23 @@ pub struct Core {
     pub fullscreen_any: bool,
     /// Pause state last sent to the renderer.
     pub paused: HashSet<String>,
+    /// Playlist timers: group key (monitor, or "sync:<playlist key>") -> seconds since last change.
+    pub pl_elapsed: HashMap<String, f64>,
+}
+
+/// Monitors changed together by one playlist timer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlGroup {
+    pub key: String,
+    pub monitors: Vec<String>,
+    pub cfg: Playlist,
 }
 
 impl Core {
     pub fn new(state_path: PathBuf, monitors: Vec<String>, renderer: Box<dyn Renderer>) -> Core {
         let state = State::load(&state_path);
         let mut core = Core { state, state_path, catalog: Catalog::default(), monitors, renderer, scene_unsupported: HashMap::new(),
-            covered: HashSet::new(), fullscreen_any: false, paused: HashSet::new() };
+            covered: HashSet::new(), fullscreen_any: false, paused: HashSet::new(), pl_elapsed: HashMap::new() };
         core.rescan();
         core
     }
@@ -129,6 +139,14 @@ impl Core {
             .collect();
         for e in &self.catalog.errors {
             eprintln!("[catalog] {}: {}", e.dir.display(), e.error);
+        }
+        // Wallpapers gone from the catalog silently leave the collections
+        // (not on an empty catalog: that is more likely a missing library).
+        if !self.catalog.projects.is_empty() {
+            let cat = &self.catalog;
+            if self.state.retain_known(&|id| cat.get(id).is_some()) {
+                self.persist();
+            }
         }
     }
 
@@ -161,14 +179,7 @@ impl Core {
             .iter()
             .map(|p| {
                 let id = p.id();
-                let (mut status, mut reason) = p.status();
-                if status == "ok" {
-                    if let Some(r) = self.scene_unsupported.get(&id) {
-                        (status, reason) = ("unsupported", r.clone());
-                    } else if let Some(r) = RUNTIME_BROKEN.lock().unwrap().get(&id) {
-                        (status, reason) = ("broken", r.clone());
-                    }
-                }
+                let (status, reason) = self.project_status(p);
                 json!({
                     "id": id, "title": p.title, "type": p.kind.as_str(),
                     "supported": p.kind.is_supported(),
@@ -179,6 +190,19 @@ impl Core {
             })
             .collect();
         Value::Array(items).to_string()
+    }
+
+    fn project_status(&self, p: &Project) -> (&'static str, String) {
+        let id = p.id();
+        let (mut status, mut reason) = p.status();
+        if status == "ok" {
+            if let Some(r) = self.scene_unsupported.get(&id) {
+                (status, reason) = ("unsupported", r.clone());
+            } else if let Some(r) = RUNTIME_BROKEN.lock().unwrap().get(&id) {
+                (status, reason) = ("broken", r.clone());
+            }
+        }
+        (status, reason)
     }
 
     /// Settings for the GUI: {fps, volume, muted, pause_on_maximized, pause_on_fullscreen_any, monitors, directories}.
@@ -284,12 +308,180 @@ impl Core {
             self.state.assignments.insert(monitor.into(), id.into());
         }
         self.persist();
+        self.reset_playlist_timer(monitor);
         if monitor == "*" {
             self.apply_all();
         } else {
             self.apply_monitor(monitor);
         }
         Ok(())
+    }
+
+    // ---- collections ----
+
+    pub fn collections_json(&self) -> String {
+        self.state.collections_json()
+    }
+
+    pub fn set_favorite(&mut self, id: &str, on: bool) {
+        self.state.set_favorite(id, on);
+        self.persist();
+    }
+
+    pub fn create_collection(&mut self, name: &str) -> String {
+        let id = self.state.create_collection(name);
+        self.persist();
+        id
+    }
+
+    pub fn rename_collection(&mut self, id: &str, name: &str) -> Result<(), String> {
+        self.state.rename_collection(id, name)?;
+        self.persist();
+        Ok(())
+    }
+
+    pub fn delete_collection(&mut self, id: &str) -> Result<(), String> {
+        self.state.delete_collection(id)?;
+        self.persist();
+        Ok(())
+    }
+
+    pub fn add_to_collection(&mut self, id: &str, wallpaper: &str) -> Result<(), String> {
+        if self.catalog.get(wallpaper).is_none() {
+            return Err(format!("unknown wallpaper {wallpaper}"));
+        }
+        self.state.add_to_collection(id, wallpaper)?;
+        self.persist();
+        Ok(())
+    }
+
+    pub fn remove_from_collection(&mut self, id: &str, wallpaper: &str) -> Result<(), String> {
+        self.state.remove_from_collection(id, wallpaper)?;
+        self.persist();
+        Ok(())
+    }
+
+    // ---- playlists ----
+
+    /// Playlist in effect for a monitor: its own, else "*", else disabled default.
+    pub fn playlist_for(&self, monitor: &str) -> Playlist {
+        self.state.playlists.get(monitor).or_else(|| self.state.playlists.get("*")).cloned().unwrap_or_default()
+    }
+
+    pub fn playlist_json(&self, monitor: &str) -> String {
+        serde_json::to_string(&self.playlist_for(monitor)).unwrap_or_default()
+    }
+
+    pub fn set_playlist(&mut self, monitor: &str, json: &str) -> Result<(), String> {
+        let p: Playlist = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        if p.interval_min == 0 {
+            return Err("interval_min must be >= 1".into());
+        }
+        if p.order != "shuffle" && p.order != "sequential" {
+            return Err(format!("unknown order {}", p.order));
+        }
+        if p.source != "all" && self.state.source_items(&p.source).is_none() {
+            return Err(format!("unknown source {}", p.source));
+        }
+        if monitor == "*" {
+            self.state.playlists.clear();
+        }
+        self.state.playlists.insert(monitor.into(), p);
+        self.persist();
+        self.reset_playlist_timer(monitor);
+        Ok(())
+    }
+
+    /// Timer groups of the known monitors (disabled playlists only if asked).
+    pub fn playlist_groups(&self, include_disabled: bool) -> Vec<PlGroup> {
+        let mut out: Vec<PlGroup> = vec![];
+        for m in &self.monitors {
+            let cfg = self.playlist_for(m);
+            if !cfg.enabled && !include_disabled {
+                continue;
+            }
+            if cfg.sync_monitors {
+                let key = format!("sync:{}", if self.state.playlists.contains_key(m) { m } else { "*" });
+                if let Some(g) = out.iter_mut().find(|g| g.key == key) {
+                    g.monitors.push(m.clone());
+                    continue;
+                }
+                out.push(PlGroup { key, monitors: vec![m.clone()], cfg });
+            } else {
+                out.push(PlGroup { key: m.clone(), monitors: vec![m.clone()], cfg });
+            }
+        }
+        out
+    }
+
+    /// Wallpapers a playlist may show right now (supported, not broken).
+    pub fn playlist_candidates(&self, source: &str) -> Vec<String> {
+        let ids: Vec<String> = if source == "all" {
+            self.catalog.projects.iter().map(|p| p.id()).collect()
+        } else {
+            self.state.source_items(source).map(|s| s.to_vec()).unwrap_or_default()
+        };
+        ids.into_iter().filter(|id| self.catalog.get(id).is_some_and(|p| self.project_status(p).0 == "ok")).collect()
+    }
+
+    /// Manual change on `monitor` ("*" = all) restarts the interval.
+    fn reset_playlist_timer(&mut self, monitor: &str) {
+        if monitor == "*" {
+            self.pl_elapsed.clear();
+            return;
+        }
+        for g in self.playlist_groups(true) {
+            if g.monitors.iter().any(|m| m == monitor) {
+                self.pl_elapsed.remove(&g.key);
+            }
+        }
+        self.pl_elapsed.remove(monitor);
+    }
+
+    /// Switch a group to its next wallpaper; returns the changed monitors.
+    fn advance_group(&mut self, g: &PlGroup, rnd: u64) -> Vec<String> {
+        self.pl_elapsed.remove(&g.key);
+        let cands = self.playlist_candidates(&g.cfg.source);
+        let current = g.monitors.first().and_then(|m| self.state.wallpaper_for(m)).map(str::to_string);
+        let Some(next) = crate::playlist::pick_next(&cands, current.as_deref(), g.cfg.order == "shuffle", rnd) else {
+            return vec![];
+        };
+        for m in &g.monitors {
+            self.state.assignments.insert(m.clone(), next.clone());
+            self.apply_monitor(m);
+        }
+        self.persist();
+        g.monitors.clone()
+    }
+
+    /// NextWallpaper: now, regardless of the timer ("*" = every monitor).
+    pub fn next_wallpaper(&mut self, monitor: &str) -> Vec<String> {
+        let mut changed = vec![];
+        for g in self.playlist_groups(true) {
+            if monitor == "*" || g.monitors.iter().any(|m| m == monitor) {
+                changed.extend(self.advance_group(&g, crate::playlist::random_u64()));
+            }
+        }
+        changed
+    }
+
+    /// Advance timers by `dt` seconds; returns monitors whose wallpaper changed.
+    /// Paused groups (all their monitors paused) don't count time.
+    pub fn playlist_tick(&mut self, dt: f64) -> Vec<String> {
+        let mut changed = vec![];
+        let groups = self.playlist_groups(false);
+        self.pl_elapsed.retain(|k, _| groups.iter().any(|g| &g.key == k));
+        for g in groups {
+            if g.monitors.iter().all(|m| self.paused.contains(m)) {
+                continue;
+            }
+            let e = self.pl_elapsed.entry(g.key.clone()).or_insert(0.0);
+            *e += dt;
+            if *e >= g.cfg.interval_min as f64 * 60.0 {
+                changed.extend(self.advance_group(&g, crate::playlist::random_u64()));
+            }
+        }
+        changed
     }
 
     pub fn set_fps(&mut self, fps: u32) -> Result<(), String> {
@@ -355,6 +547,7 @@ mod tests {
             covered: HashSet::new(),
             fullscreen_any: false,
             paused: HashSet::new(),
+            pl_elapsed: HashMap::new(),
         };
         c.update_pause();
         (c, log, dir)
@@ -393,5 +586,65 @@ mod tests {
         let l = take(&log);
         assert_eq!(l, [("DP-1".into(), true), ("DP-1".into(), false)]);
         assert!(c.paused.contains("HDMI-1"));
+    }
+
+    fn mk(dir: &std::path::Path, id: &str, kind: &str) {
+        let d = dir.join(id);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("a.mp4"), b"").unwrap();
+        std::fs::write(d.join("project.json"), format!(r#"{{"title":"{id}","type":"{kind}","file":"a.mp4"}}"#)).unwrap();
+    }
+
+    #[test]
+    fn playlist_ticks_pauses_and_resets() {
+        let (mut c, _log, d) = core();
+        let wp = d.path().join("wp");
+        mk(&wp, "100", "video");
+        mk(&wp, "101", "video");
+        mk(&wp, "102", "application");
+        c.catalog = Catalog::scan(&[&wp]);
+        let ids: Vec<String> = c.catalog.projects.iter().map(|p| p.id()).collect();
+        assert_eq!(c.playlist_candidates("all").len(), ids.len() - 1, "unsupported skipped");
+        c.set_favorite("101", true);
+        assert_eq!(c.playlist_candidates("favorites"), ["101"]);
+        assert!(c.set_playlist("*", r#"{"enabled":true,"source":"nope"}"#).is_err());
+        c.set_playlist("*", r#"{"enabled":true,"source":"all","interval_min":1,"order":"sequential"}"#).unwrap();
+        c.set_wallpaper("DP-1", "100").unwrap();
+        c.set_wallpaper("HDMI-1", "100").unwrap();
+        // paused monitor doesn't count time
+        c.paused.insert("DP-1".into());
+        assert!(c.playlist_tick(59.0).is_empty());
+        c.paused.remove("DP-1");
+        assert!(c.playlist_tick(0.5).is_empty());
+        // manual change resets the timer of that monitor only
+        c.set_wallpaper("DP-1", "100").unwrap();
+        assert_eq!(c.playlist_tick(0.6), ["HDMI-1"]);
+        assert_eq!(c.state.wallpaper_for("HDMI-1"), Some("101"));
+        assert_eq!(c.state.wallpaper_for("DP-1"), Some("100"));
+        // next on one monitor
+        assert_eq!(c.next_wallpaper("DP-1"), ["DP-1"]);
+        assert_eq!(c.state.wallpaper_for("DP-1"), Some("101"));
+        // sync: one wallpaper for all
+        c.set_playlist("*", r#"{"enabled":true,"source":"all","interval_min":1,"order":"sequential","sync_monitors":true}"#).unwrap();
+        assert_eq!(c.playlist_groups(false).len(), 1);
+        c.next_wallpaper("*");
+        assert_eq!(c.state.wallpaper_for("DP-1"), c.state.wallpaper_for("HDMI-1"));
+        // disabled: no ticks
+        c.set_playlist("*", r#"{"enabled":false}"#).unwrap();
+        assert!(c.playlist_tick(10_000.0).is_empty());
+    }
+
+    #[test]
+    fn rescan_drops_removed_wallpapers() {
+        let (mut c, _log, d) = core();
+        let wp = d.path().join("wp");
+        mk(&wp, "100", "video");
+        c.state.extra_dirs = vec![wp.clone()];
+        c.rescan();
+        let id = c.catalog.projects.iter().map(|p| p.id()).find(|i| i.contains("100")).unwrap();
+        c.set_favorite(&id, true);
+        c.set_favorite("gone", true);
+        c.rescan();
+        assert_eq!(c.state.favorites, [id]);
     }
 }

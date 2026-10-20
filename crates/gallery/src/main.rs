@@ -6,7 +6,7 @@ mod gui;
 
 use zbus::blocking::{Connection, Proxy};
 
-const USAGE: &str = "usage: wpe-gallery list | scan [-v] <dir> | add-dir <dir> | volume <0..1> <muted:true|false> | fps [1..240] | set <monitor|*> <id> | props <id> | prop <id> <key> <json>";
+const USAGE: &str = "usage: wpe-gallery list | scan [-v] <dir> | add-dir <dir> | volume <0..1> <muted:true|false> | fps [1..240] | set <monitor|*> <id> | props <id> | prop <id> <key> <json> | fav <id> [on|off] | collections | playlist <monitor> [--source all|favorites|<id>] [--interval N] [--shuffle|--sequential] [--off] | next [monitor]";
 
 fn proxy(conn: &Connection) -> zbus::Result<Proxy<'_>> {
     Proxy::new(conn, "io.github.wpe.Daemon", "/io/github/wpe/Daemon", "io.github.wpe.Daemon1")
@@ -95,6 +95,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ["prop", id, key, val] => {
             let conn = Connection::session()?;
             proxy(&conn)?.call::<_, _, ()>("SetProperty", &(id, key, val))?;
+        }
+        ["fav", id] | ["fav", id, "on"] | ["fav", id, "off"] => {
+            let on = a.get(2) != Some(&"off");
+            let conn = Connection::session()?;
+            proxy(&conn)?.call::<_, _, ()>("SetFavorite", &(id, on))?;
+        }
+        ["collections"] => {
+            let conn = Connection::session()?;
+            let json: String = proxy(&conn)?.call("GetCollections", &())?;
+            let v: serde_json::Value = serde_json::from_str(&json)?;
+            for c in v.as_array().into_iter().flatten() {
+                let items: Vec<&str> = c["items"].as_array().into_iter().flatten().filter_map(|x| x.as_str()).collect();
+                println!("{:<36} {} ({}): {}", c["id"].as_str().unwrap_or(""), c["name"].as_str().unwrap_or(""), items.len(), items.join(" "));
+            }
+        }
+        ["playlist", mon, opts @ ..] => {
+            let conn = Connection::session()?;
+            let p = proxy(&conn)?;
+            let json: String = p.call("GetPlaylist", &(mon,))?;
+            let mut cfg: serde_json::Value = serde_json::from_str(&json)?;
+            if opts.is_empty() {
+                println!("{}", serde_json::to_string_pretty(&cfg)?);
+                return Ok(());
+            }
+            cfg["enabled"] = true.into();
+            let mut it = opts.iter();
+            while let Some(o) = it.next() {
+                match *o {
+                    "--source" => cfg["source"] = it.next().ok_or("--source needs a value")?.to_string().into(),
+                    "--interval" => cfg["interval_min"] = it.next().ok_or("--interval needs minutes")?.parse::<u32>()?.into(),
+                    "--shuffle" => cfg["order"] = "shuffle".into(),
+                    "--sequential" => cfg["order"] = "sequential".into(),
+                    "--sync" => cfg["sync_monitors"] = true.into(),
+                    "--off" => cfg["enabled"] = false.into(),
+                    other => return Err(format!("unknown option {other}").into()),
+                }
+            }
+            p.call::<_, _, ()>("SetPlaylist", &(mon, cfg.to_string()))?;
+        }
+        ["next"] | ["next", _] => {
+            let conn = Connection::session()?;
+            proxy(&conn)?.call::<_, _, ()>("NextWallpaper", &(a.get(1).copied().unwrap_or("*"),))?;
         }
         _ => {
             eprintln!("{USAGE}");

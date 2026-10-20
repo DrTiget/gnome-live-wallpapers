@@ -67,7 +67,12 @@
 | `GetRendererPids() → a{su}` | монитор → PID процесса сцены, чтобы расширение нашло его окно; изменения — сигнал `RendererPidsChanged()` | расширение |
 | `SetFps(u fps)` / `GetFps() → u` | лимит FPS (1..240, по умолчанию 30, в `state.json`): сцены (перезапуск) и `requestAnimationFrame` web-обоев | галерея |
 
-Свойство `Version (s)`. Сигналы (`CatalogChanged` — после `Rescan`/`AddDirectory`/`RemoveDirectory`): `CatalogChanged()`, `AssignmentsChanged()`, `PropertiesChanged(s id)`, `RendererPidsChanged()`.
+| `GetCollections() → s` | JSON `[{id,name,builtin,items}]`, первой идёт встроенная `favorites` | галерея |
+| `SetFavorite(s id, b on)` / `CreateCollection(s name) → s id` / `RenameCollection(s id, s name)` / `DeleteCollection(s id)` / `AddToCollection(s cid, s id)` / `RemoveFromCollection(s cid, s id)` | `favorites` удалить нельзя; обои, пропавшие из каталога, молча убираются из коллекций при `Rescan` | галерея |
+| `GetPlaylist(s monitor) → s` / `SetPlaylist(s monitor, s json)` | JSON `{enabled, source: all\|favorites\|<id коллекции>, interval_min, order: shuffle\|sequential, sync_monitors}`; `"*"` = все мониторы. Таймер в демоне (тик 1 с) пропускает unsupported/broken, на паузе монитора не идёт, ручной `SetWallpaper` сбрасывает его; `sync_monitors` — одни обои на все | галерея |
+| `NextWallpaper(s monitor)` | следующие обои плейлиста сразу | галерея |
+
+Свойство `Version (s)`. Сигналы (`CatalogChanged` — после `Rescan`/`AddDirectory`/`RemoveDirectory`): `CatalogChanged()`, `AssignmentsChanged()`, `PropertiesChanged(s id)`, `RendererPidsChanged()`, `CollectionsChanged()`, `PlaylistChanged(s monitor)`.
 
 Демон стартует как systemd user unit (`wpe-daemon.service`, `PartOf=graphical-session.target`) и/или D-Bus activation.
 

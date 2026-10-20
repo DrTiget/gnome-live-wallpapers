@@ -2,6 +2,7 @@
 mod audio;
 mod core;
 mod dbus;
+mod playlist;
 #[cfg_attr(not(feature = "gtk"), allow(dead_code))]
 mod scene;
 mod state;
@@ -15,11 +16,15 @@ mod video;
 use std::sync::{Arc, Mutex};
 
 fn serve(core: Arc<Mutex<core::Core>>) -> zbus::Result<zbus::blocking::Connection> {
+    let timer_core = core.clone();
     zbus::blocking::connection::Builder::session()?
         .name(dbus::BUS_NAME)?
         .serve_at(dbus::OBJECT_PATH, dbus::Service { core })?
         .build()
-        .inspect(|conn| dbus::set_connection(conn.clone()))
+        .inspect(|conn| {
+            dbus::set_connection(conn.clone());
+            dbus::spawn_playlist_timer(timer_core.clone());
+        })
 }
 
 #[cfg(not(feature = "gtk"))]
