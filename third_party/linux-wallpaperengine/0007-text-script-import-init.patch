@@ -1,0 +1,84 @@
+From 15274237324a5d6437c572dcf524337e97b3d2e1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 20 Oct 2026 21:42:40 +0200
+Subject: [PATCH 7/7] Text layer scripts: support import, adopt init() return
+ value
+
+Layer scripts are evaluated as plain scripts in an IIFE, so an
+"import * as WEMath from 'WEMath';" line was a syntax error and the
+whole script was dropped: the placeholder text stayed on screen ("trackname"
+of the music player, day of week never updated). Imports are now resolved
+through a real module and bound as local variables. init(value) is called
+with the current text and a returned string replaces it, as in WE.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Scripting/ScriptEngine.cpp                | 38 ++++++++++++++++++-
+ 1 file changed, 37 insertions(+), 1 deletion(-)
+
+diff --git a/src/WallpaperEngine/Scripting/ScriptEngine.cpp b/src/WallpaperEngine/Scripting/ScriptEngine.cpp
+index e690b92..802816c 100644
+--- a/src/WallpaperEngine/Scripting/ScriptEngine.cpp
++++ b/src/WallpaperEngine/Scripting/ScriptEngine.cpp
+@@ -27,6 +27,7 @@
+ #include <optional>
+ #include <poll.h>
+ #include <ranges>
++#include <regex>
+ #include <signal.h>
+ #include <spawn.h>
+ #include <sstream>
+@@ -361,6 +362,35 @@ ScriptLayerHandle ScriptEngine::createLayerScript (
+     while ((pos = body.find ("export ")) != std::string::npos) {
+ 	body.erase (pos, 7);
+     }
++    // `import` is a syntax error outside a module: load each imported module
++    // (WEMath, WEColor…) once through a real module and bind it as a local var.
++    static const std::regex importRe (
++	R"(import\s+(\*\s*as\s+(\w+)|\{([^}]*)\})\s*from\s*['"]([^'"]+)['"]\s*;?)"
++    );
++    std::smatch match;
++    while (std::regex_search (body, match, importRe)) {
++	const std::string name = match[4].str ();
++	const std::string loader = "import * as __m from '" + name
++	    + "'; globalThis.__layerModules = globalThis.__layerModules || {}; globalThis.__layerModules['" + name
++	    + "'] = __m;";
++	JSValue loaded = JS_Eval (ctx, loader.c_str (), loader.size (), "<layer-import>", JS_EVAL_TYPE_MODULE);
++	if (JS_IsException (loaded)) {
++	    logJSException (ctx, "layer import");
++	}
++	JS_FreeValue (ctx, loaded);
++	for (JSContext* jobCtx; JS_ExecutePendingJob (this->m_runtime, &jobCtx) > 0;) {
++	}
++	const std::string ns = "(globalThis.__layerModules || {})['" + name + "']";
++	std::string replacement;
++	if (match[2].matched) {
++	    replacement = "var " + match[2].str () + " = " + ns + ";";
++	} else {
++	    // `{ a, b as c }` -> `{ a, b: c }`
++	    replacement = "var {" + std::regex_replace (match[3].str (), std::regex (R"(\s+as\s+)"), ": ") + "} = "
++		+ ns + " || {};";
++	}
++	body.replace (static_cast<size_t> (match.position (0)), static_cast<size_t> (match.length (0)), replacement);
++    }
+ 
+     // The IIFE gives every layer its own closure for top-level vars and
+     // functions, so two layers that both define `function update()` or a
+@@ -410,7 +440,13 @@ ScriptLayerHandle ScriptEngine::createLayerScript (
+ 	<< "  globalThis.__textLayers[__id] = {\n"
+ 	<< "    thisLayer: thisLayer,\n"
+ 	<< "    thisScene: thisScene,\n"
+-	<< "    _init:    (typeof init    === 'function') ? init    : null,\n"
++	// WE calls `init(value)` with the current text and adopts a returned string, like update().
++	<< "    _init:    (typeof init    === 'function')\n"
++	<< "              ? function() {\n"
++	<< "                  var r = init(thisLayer.text);\n"
++	<< "                  if (typeof r === 'string') thisLayer.text = r;\n"
++	<< "                }\n"
++	<< "              : null,\n"
+ 	<< "    _destroy: (typeof destroy === 'function') ? destroy : null,\n"
+ 	<< "    _tick:    (typeof update  === 'function')\n"
+ 	<< "              ? function() {\n"
+-- 
+2.53.0
+

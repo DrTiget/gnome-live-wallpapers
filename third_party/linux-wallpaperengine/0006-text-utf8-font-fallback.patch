@@ -1,0 +1,238 @@
+From 2a85537442c76f85266476bfd0d378a2933459cb Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 20 Oct 2026 21:42:40 +0200
+Subject: [PATCH 6/7] Text: decode UTF-8, fontconfig fallback for missing
+ glyphs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Text was rasterized byte by byte, so "「 TUESDAY 」" came out as Latin-1
+garbage. Decode UTF-8 to code points and, when the wallpaper font has no
+glyph (CJK brackets, symbols), take a face from fontconfig that has it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                               |  3 +
+ src/WallpaperEngine/Render/Objects/CText.cpp | 94 ++++++++++++++++++--
+ src/WallpaperEngine/Render/Objects/CText.h   |  9 ++
+ 3 files changed, 101 insertions(+), 5 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4141453..5dba3d9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -37,6 +37,7 @@ find_package(LZ4 REQUIRED)
+ find_package(FFMPEG REQUIRED)
+ find_package(PulseAudio REQUIRED)
+ find_package(Freetype REQUIRED)
++find_package(Fontconfig REQUIRED)
+ 
+ set(ENABLE_OPT OFF)
+ set(SPIRV_CROSS_FORCE_PIC ON)
+@@ -588,6 +589,7 @@ target_link_libraries (linux-wallpaperengine-lib PUBLIC
+     ${MPV_LIBRARY}
+     ${PULSEAUDIO_LIBRARY}
+     Freetype::Freetype
++    Fontconfig::Fontconfig
+     ${WAYLAND_LIBRARIES}
+     ${X11_LIBRARIES}
+     ${DBUS_LIBRARIES}
+@@ -614,6 +616,7 @@ if (BUILD_TESTING)
+         ${MPV_LIBRARY}
+         ${PULSEAUDIO_LIBRARY}
+         Freetype::Freetype
++    Fontconfig::Fontconfig
+         ${WAYLAND_LIBRARIES}
+         ${X11_LIBRARIES}
+         ${DBUS_LIBRARIES}
+diff --git a/src/WallpaperEngine/Render/Objects/CText.cpp b/src/WallpaperEngine/Render/Objects/CText.cpp
+index 8368634..086dfea 100644
+--- a/src/WallpaperEngine/Render/Objects/CText.cpp
++++ b/src/WallpaperEngine/Render/Objects/CText.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include <ft2build.h>
+ #include FT_FREETYPE_H
++#include <fontconfig/fontconfig.h>
+ 
+ #include <glm/gtc/matrix_transform.hpp>
+ #include <glm/gtc/type_ptr.hpp>
+@@ -20,6 +21,31 @@
+ using namespace WallpaperEngine::Render::Objects;
+ 
+ namespace {
++// Text values are UTF-8; invalid bytes become U+FFFD.
++std::u32string decodeUtf8 (const std::string& text) {
++    std::u32string out;
++    out.reserve (text.size ());
++    for (size_t i = 0; i < text.size ();) {
++	const auto c = static_cast<unsigned char> (text[i]);
++	int len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 0;
++	char32_t cp = len == 1 ? c : len == 2 ? (c & 0x1F) : len == 3 ? (c & 0x0F) : (c & 0x07);
++	bool ok = len > 0 && i + len <= text.size ();
++	for (int k = 1; ok && k < len; ++k) {
++	    const auto cc = static_cast<unsigned char> (text[i + k]);
++	    ok = (cc & 0xC0) == 0x80;
++	    cp = (cp << 6) | (cc & 0x3F);
++	}
++	if (!ok) {
++	    out.push_back (U'\uFFFD');
++	    i += 1;
++	    continue;
++	}
++	out.push_back (cp);
++	i += len;
++    }
++    return out;
++}
++
+ // TODO: Phase 2 – load font from wallpaper's materials/fonts/ using AssetLocator
+ // Phase 1 uses a system font instead of the font shipped by the wallpaper.
+ // Wallpaper Engine bundles .ttf files in `materials/fonts/`; wiring those in
+@@ -102,6 +128,9 @@ CText::~CText () {
+     if (m_texture != 0) {
+ 	glDeleteTextures (1, &m_texture);
+     }
++    for (auto& [key, face] : m_fallbackFaces) {
++	FT_Done_Face (face);
++    }
+     if (m_ftFace != nullptr) {
+ 	FT_Done_Face (m_ftFace);
+     }
+@@ -201,6 +230,59 @@ bool CText::loadSystemFont () {
+     return true;
+ }
+ 
++FT_Face CText::faceFor (char32_t codepoint) {
++    if (codepoint < 0x20 || FT_Get_Char_Index (m_ftFace, codepoint) != 0) {
++	return m_ftFace;
++    }
++    if (const auto cached = m_fallbackFor.find (codepoint); cached != m_fallbackFor.end ()) {
++	return cached->second != nullptr ? cached->second : m_ftFace;
++    }
++
++    FT_Face found = nullptr;
++    FcPattern* pattern = FcPatternCreate ();
++    FcCharSet* charset = FcCharSetCreate ();
++    FcCharSetAddChar (charset, codepoint);
++    FcPatternAddCharSet (pattern, FC_CHARSET, charset);
++    FcConfigSubstitute (nullptr, pattern, FcMatchPattern);
++    FcDefaultSubstitute (pattern);
++    FcResult result;
++    if (FcPattern* match = FcFontMatch (nullptr, pattern, &result)) {
++	FcChar8* file = nullptr;
++	int index = 0;
++	FcCharSet* matchCharset = nullptr;
++	if (FcPatternGetString (match, FC_FILE, 0, &file) == FcResultMatch
++	    && FcPatternGetCharSet (match, FC_CHARSET, 0, &matchCharset) == FcResultMatch
++	    && FcCharSetHasChar (matchCharset, codepoint)) {
++	    FcPatternGetInteger (match, FC_INDEX, 0, &index);
++	    const std::string key = reinterpret_cast<const char*> (file) + std::string (":") + std::to_string (index);
++	    if (const auto it = m_fallbackFaces.find (key); it != m_fallbackFaces.end ()) {
++		found = it->second;
++	    } else if (FT_New_Face (m_ftLibrary, reinterpret_cast<const char*> (file), index, &found) == 0) {
++		m_fallbackFaces.emplace (key, found);
++	    } else {
++		found = nullptr;
++	    }
++	}
++	FcPatternDestroy (match);
++    }
++    FcCharSetDestroy (charset);
++    FcPatternDestroy (pattern);
++
++    m_fallbackFor.emplace (codepoint, found);
++    return found != nullptr ? found : m_ftFace;
++}
++
++FT_GlyphSlot CText::loadGlyph (char32_t codepoint) {
++    FT_Face face = faceFor (codepoint);
++    if (face != m_ftFace) {
++	FT_Set_Pixel_Sizes (face, 0, static_cast<FT_UInt> (m_lastPixelSize));
++    }
++    if (FT_Load_Char (face, static_cast<FT_ULong> (codepoint), FT_LOAD_RENDER) != 0) {
++	return nullptr;
++    }
++    return face->glyph;
++}
++
+ unsigned int CText::computeEffectivePixelSize () const {
+     // WE text objects often come with scale ~0.09 that, combined with a modest
+     // pointsize, would rasterize glyphs to ~2px on screen (invisible). Rasterize
+@@ -236,14 +318,15 @@ void CText::rebuildTextureFrom (const std::string& text) {
+     // Safe to call repeatedly: GL handles (texture, VAO, VBO) are reused when
+     // already allocated, so dynamic/scripted text can regenerate the glyph
+     // bitmap every time the rendered string changes without leaking.
+-    FT_GlyphSlot slot = m_ftFace->glyph;
++    const std::u32string codepoints = decodeUtf8 (text);
+ 
+     int penX = 0;
+     int maxAscent = 0;
+     int maxDescent = 0;
+ 
+-    for (unsigned char c : text) {
+-	if (FT_Load_Char (m_ftFace, static_cast<FT_ULong> (c), FT_LOAD_RENDER) != 0) {
++    for (char32_t c : codepoints) {
++	FT_GlyphSlot slot = loadGlyph (c);
++	if (slot == nullptr) {
+ 	    continue;
+ 	}
+ 	penX += slot->advance.x >> 6;
+@@ -256,8 +339,9 @@ void CText::rebuildTextureFrom (const std::string& text) {
+     std::vector<uint8_t> pixels (static_cast<size_t> (width) * height, 0);
+ 
+     penX = 0;
+-    for (unsigned char c : text) {
+-	if (FT_Load_Char (m_ftFace, static_cast<FT_ULong> (c), FT_LOAD_RENDER) != 0) {
++    for (char32_t c : codepoints) {
++	FT_GlyphSlot slot = loadGlyph (c);
++	if (slot == nullptr) {
+ 	    continue;
+ 	}
+ 
+diff --git a/src/WallpaperEngine/Render/Objects/CText.h b/src/WallpaperEngine/Render/Objects/CText.h
+index 06c413f..204897a 100644
+--- a/src/WallpaperEngine/Render/Objects/CText.h
++++ b/src/WallpaperEngine/Render/Objects/CText.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <map>
+ #include <string>
+ #include <vector>
+ 
+@@ -14,8 +15,10 @@
+ // Forward-declare FreeType types to avoid leaking the header into users.
+ struct FT_LibraryRec_;
+ struct FT_FaceRec_;
++struct FT_GlyphSlotRec_;
+ typedef struct FT_LibraryRec_* FT_Library;
+ typedef struct FT_FaceRec_* FT_Face;
++typedef struct FT_GlyphSlotRec_* FT_GlyphSlot;
+ 
+ namespace WallpaperEngine::Render::Wallpapers {
+ class CScene;
+@@ -59,6 +62,8 @@ private:
+     bool loadSystemFont ();
+     unsigned int computeEffectivePixelSize () const;
+     void initScriptLayer ();
++    FT_Face faceFor (char32_t codepoint);
++    FT_GlyphSlot loadGlyph (char32_t codepoint);
+ 
+     const Text& m_text;
+     std::string m_lastRenderedText;
+@@ -68,6 +73,10 @@ private:
+     FT_Library m_ftLibrary = nullptr;
+     FT_Face m_ftFace = nullptr;
+     std::vector<uint8_t> m_fontData;
++    // Faces from fontconfig for characters the primary font lacks (CJK brackets, emoji…),
++    // keyed by "file:index"; m_fallbackFor caches the face per code point (nullptr = none found).
++    std::map<std::string, FT_Face> m_fallbackFaces;
++    std::map<char32_t, FT_Face> m_fallbackFor;
+ 
+     GLuint m_texture = 0;
+     GLuint m_program = 0;
+-- 
+2.53.0
+

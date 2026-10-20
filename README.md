@@ -62,7 +62,7 @@ scripts/install.sh      # сборка и установка в ~/.local: wpe-da
 sudo apt install cmake libglfw3-dev libglew-dev libglm-dev libsdl2-dev liblz4-dev \
   libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev libmpv-dev libpulse-dev \
   libfftw3-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev \
-  libwayland-dev wayland-protocols libxkbcommon-dev libegl-dev libgl-dev libfreetype-dev \
+  libwayland-dev wayland-protocols libxkbcommon-dev libegl-dev libgl-dev libfreetype-dev libfontconfig-dev \
   libpng-dev libgmp-dev libffi-dev libdbus-1-dev libzstd-dev
 scripts/build-scene-renderer.sh   # → ~/.local/lib/linux-wallpaperengine + симлинк в ~/.local/bin
 ```

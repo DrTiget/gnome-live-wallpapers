@@ -1,0 +1,58 @@
+From 83c3ace5bf6b4c6016efd167a4f8b48c92768d8c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 20 Oct 2026 21:42:40 +0200
+Subject: [PATCH 5/7] Do not draw solid layers marked "solid": false
+
+Such a layer is an invisible container (scripts, children). With size 0x0
+it was stretched to the whole scene and filled white, e.g. the music player
+"Player Options" layer in workshop 3481803447 covered most of the screen.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/WallpaperEngine/Data/Model/Object.h           | 2 ++
+ src/WallpaperEngine/Data/Parsers/ObjectParser.cpp | 1 +
+ src/WallpaperEngine/Render/Objects/CImage.cpp     | 3 +++
+ 3 files changed, 6 insertions(+)
+
+diff --git a/src/WallpaperEngine/Data/Model/Object.h b/src/WallpaperEngine/Data/Model/Object.h
+index c346aab..94c5463 100644
+--- a/src/WallpaperEngine/Data/Model/Object.h
++++ b/src/WallpaperEngine/Data/Model/Object.h
+@@ -123,6 +123,8 @@ struct ImageData {
+     std::vector<ImageEffectUniquePtr> effects;
+     /** The animation layers used in the puppet warp */
+     std::vector<ImageAnimationLayerUniquePtr> animationLayers;
++    /** "solid": false on a solid layer makes it an invisible container (scripts, children) */
++    bool solid = true;
+ };
+ 
+ class Image : public Object, public ImageData {
+diff --git a/src/WallpaperEngine/Data/Parsers/ObjectParser.cpp b/src/WallpaperEngine/Data/Parsers/ObjectParser.cpp
+index 4e35f5a..619c291 100644
+--- a/src/WallpaperEngine/Data/Parsers/ObjectParser.cpp
++++ b/src/WallpaperEngine/Data/Parsers/ObjectParser.cpp
+@@ -164,6 +164,7 @@ ObjectParser::parseImage (const JSON& it, const Project& project, ObjectData bas
+ 	    .effects = effects.has_value () ? parseEffects (*effects, project) : std::vector<ImageEffectUniquePtr> {},
+ 	    .animationLayers = animationLayers.has_value () ? parseAnimationLayers (*animationLayers, project)
+ 							    : std::vector<ImageAnimationLayerUniquePtr> {},
++	    .solid = it.optional ("solid", true),
+ 	}
+     );
+ 
+diff --git a/src/WallpaperEngine/Render/Objects/CImage.cpp b/src/WallpaperEngine/Render/Objects/CImage.cpp
+index ef509d4..180c868 100644
+--- a/src/WallpaperEngine/Render/Objects/CImage.cpp
++++ b/src/WallpaperEngine/Render/Objects/CImage.cpp
+@@ -855,6 +855,9 @@ bool CImage::shouldRenderFinalPass (bool isLastPass) const {
+     if (!isLastPass || !this->getImage ().visible->value->getBool ()) {
+ 	return false;
+     }
++    if (this->getImage ().model->solidlayer && !this->getImage ().solid) {
++	return false;
++    }
+ 
+     const auto& debug = this->getScene ().getContext ().getApp ().getContext ().settings.render.debug;
+     return !(debug.noSolidFinal && this->getImage ().model->solidlayer);
+-- 
+2.53.0
+

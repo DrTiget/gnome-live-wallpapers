@@ -1,0 +1,35 @@
+From feab3d436811abc81440f2042ebb1d653afa3026 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 20 Oct 2026 21:42:40 +0200
+Subject: [PATCH 4/7] Image size: model dimensions win over the first texture
+
+getSize() returned the first texture's real size whenever a texture was
+bound, so a layer whose first texture is a mask was drawn at the mask size:
+deep_space Background (flowimage: flowmask 480x270 + 1920x1080 layers) ended
+up as a small rotated rectangle in the middle of the scene. The model's
+width/height define the quad; fall back to the texture only without them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/WallpaperEngine/Render/Objects/CImage.cpp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/WallpaperEngine/Render/Objects/CImage.cpp b/src/WallpaperEngine/Render/Objects/CImage.cpp
+index be0baca..ef509d4 100644
+--- a/src/WallpaperEngine/Render/Objects/CImage.cpp
++++ b/src/WallpaperEngine/Render/Objects/CImage.cpp
+@@ -1133,6 +1133,11 @@ glm::vec2 CImage::getSize () const {
+     if (this->m_texture == nullptr) {
+ 	return this->getImage ().size;
+     }
++    // The model's dimensions define the quad: the first texture can be a mask
++    // (e.g. a 480x270 flowmask over 1920x1080 layers) rather than the image itself.
++    if (this->getImage ().model->width.has_value () && this->getImage ().model->height.has_value ()) {
++	return { this->getImage ().model->width.value (), this->getImage ().model->height.value () };
++    }
+ 
+     return { this->m_texture->getRealWidth (), this->m_texture->getRealHeight () };
+ }
+-- 
+2.53.0
+

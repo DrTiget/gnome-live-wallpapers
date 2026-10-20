@@ -30,3 +30,20 @@ Pinned commit: `b016d7d` (master, 2026-06-09) — `UPSTREAM_COMMIT` in
 scene) print it and `_Exit(1)` instead of returning from `main`, whose static
 destructors (CEF, audio threads) could hang and leave a process without a window.
 wpe-daemon reads its output and marks such wallpapers `broken` with that line as reason.
+
+`0004-image-size-from-model.patch`: an image's quad size comes from the model's
+`width`/`height`, the first texture's size is only a fallback. The first texture
+can be a mask: `deep_space` Background (flowimage, 480x270 flowmask over
+1920x1080 layers) was drawn as a small rotated rectangle in the middle.
+
+`0005-hide-non-solid-solid-layers.patch`: a solid layer with `"solid": false` is an
+invisible container and is not drawn. With size 0x0 it used to be stretched over
+the scene and filled white (music player "Player Options" in workshop 3481803447).
+
+`0006-text-utf8-font-fallback.patch`: text is decoded as UTF-8 (was byte by byte,
+so `「 TUESDAY 」` came out as `ã�� …`); characters missing in the wallpaper's font
+are taken from a fontconfig match (needs `libfontconfig-dev` to build).
+
+`0007-text-script-import-init.patch`: text layer scripts with `import * as WEMath
+from 'WEMath'` no longer fail with a syntax error (the placeholder text, e.g.
+"trackname", stayed on screen); `init(value)` result replaces the text as in WE.
