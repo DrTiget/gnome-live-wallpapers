@@ -36,6 +36,14 @@ pub fn set_renderer_pid(monitor: &str, pid: Option<u32>) {
     }
 }
 
+/// Status of some wallpaper changed outside a D-Bus call (renderer crash).
+#[cfg_attr(not(feature = "gtk"), allow(dead_code))]
+pub fn emit_catalog_changed() {
+    if let Some(conn) = CONNECTION.get() {
+        let _ = conn.emit_signal(None::<&str>, OBJECT_PATH, INTERFACE, "CatalogChanged", &());
+    }
+}
+
 pub struct Service {
     pub core: Arc<Mutex<Core>>,
 }

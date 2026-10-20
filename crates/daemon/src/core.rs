@@ -2,7 +2,9 @@
 
 use crate::state::State;
 use serde_json::{json, Map, Value};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use we_core::{Catalog, Project, ProjectType, ValidationIssue};
 
 /// ("ok" | "unsupported" | "broken", human-readable reason) for the GUI.
@@ -21,6 +23,10 @@ impl Status for Project {
         }
     }
 }
+
+/// Wallpaper id -> reason its renderer crashed at start (set by the renderer,
+/// cleared once it runs fine); shown as status "broken".
+pub static RUNTIME_BROKEN: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
 /// Commands the core sends to the active renderer backend.
 #[derive(Debug, Clone, PartialEq)]
@@ -82,12 +88,14 @@ pub struct Core {
     pub catalog: Catalog,
     pub monitors: Vec<String>,
     pub renderer: Box<dyn Renderer>,
+    /// Scene id -> why linux-wallpaperengine can't render it (from its scene file, at rescan).
+    pub scene_unsupported: HashMap<String, String>,
 }
 
 impl Core {
     pub fn new(state_path: PathBuf, monitors: Vec<String>, renderer: Box<dyn Renderer>) -> Core {
         let state = State::load(&state_path);
-        let mut core = Core { state, state_path, catalog: Catalog::default(), monitors, renderer };
+        let mut core = Core { state, state_path, catalog: Catalog::default(), monitors, renderer, scene_unsupported: HashMap::new() };
         core.rescan();
         core
     }
@@ -105,6 +113,13 @@ impl Core {
         roots.extend(local_wallpaper_dir());
         roots.extend(self.state.extra_dirs.iter().cloned());
         self.catalog = Catalog::scan(&roots);
+        self.scene_unsupported = self
+            .catalog
+            .projects
+            .iter()
+            .filter(|p| p.kind == ProjectType::Scene)
+            .filter_map(|p| Some((p.id(), crate::scene::unsupported_reason(&p.root, p.file.as_deref())?)))
+            .collect();
         for e in &self.catalog.errors {
             eprintln!("[catalog] {}: {}", e.dir.display(), e.error);
         }
@@ -138,9 +153,17 @@ impl Core {
             .projects
             .iter()
             .map(|p| {
-                let (status, reason) = p.status();
+                let id = p.id();
+                let (mut status, mut reason) = p.status();
+                if status == "ok" {
+                    if let Some(r) = self.scene_unsupported.get(&id) {
+                        (status, reason) = ("unsupported", r.clone());
+                    } else if let Some(r) = RUNTIME_BROKEN.lock().unwrap().get(&id) {
+                        (status, reason) = ("broken", r.clone());
+                    }
+                }
                 json!({
-                    "id": p.id(), "title": p.title, "type": p.kind.as_str(),
+                    "id": id, "title": p.title, "type": p.kind.as_str(),
                     "supported": p.kind.is_supported(),
                     "preview": p.preview_path(), "root": p.root, "tags": p.tags,
                     "audio": p.supports_audio, "rating": p.content_rating,
@@ -207,6 +230,9 @@ impl Core {
             let p = self.catalog.get(id).ok_or_else(|| format!("unknown wallpaper {id}"))?;
             if !p.kind.is_supported() {
                 return Err(format!("unsupported type {}", p.kind.as_str()));
+            }
+            if let Some(r) = self.scene_unsupported.get(id) {
+                return Err(r.clone());
             }
             self.state.assignments.insert(monitor.into(), id.into());
         }

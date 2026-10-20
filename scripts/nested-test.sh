@@ -132,6 +132,9 @@ fi
         fi
     done
     grep -E "^\[scene\]" "$OUT/daemon.log"
+    echo "--- not ok (ListWallpapers status):"
+    gdbus call --session -d io.github.wpe.Daemon -o /io/github/wpe/Daemon -m io.github.wpe.Daemon1.ListWallpapers \
+        | python3 -c 'import ast,json,sys; [print(w["id"], w["status"], w["reason"]) for w in json.loads(ast.literal_eval(sys.stdin.read().strip()[1:-2])) if w["status"] != "ok"]'
     kill $DAEMON_PID; sleep 1; kill $SHELL_PID; wait
     exit 0
 fi

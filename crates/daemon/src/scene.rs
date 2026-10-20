@@ -86,6 +86,84 @@ pub fn command_args(root: &Path, user_properties: &Value, o: &SceneOptions) -> V
     a
 }
 
+/// One file of a scene: the project directory first, then `scene.pkg`
+/// (`PKGV…` archive: u32-length-prefixed strings, entry table of
+/// name/offset/size, offsets relative to the end of the table).
+pub fn read_scene_file(root: &Path, name: &str) -> Option<Vec<u8>> {
+    if let Ok(b) = std::fs::read(root.join(name)) {
+        return Some(b);
+    }
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::io::BufReader::new(std::fs::File::open(root.join("scene.pkg")).ok()?);
+    let u32_ = |f: &mut std::io::BufReader<std::fs::File>| -> Option<u32> {
+        let mut b = [0u8; 4];
+        f.read_exact(&mut b).ok()?;
+        Some(u32::from_le_bytes(b))
+    };
+    let string = |f: &mut std::io::BufReader<std::fs::File>, len: u32| -> Option<String> {
+        if len > 4096 {
+            return None;
+        }
+        let mut b = vec![0u8; len as usize];
+        f.read_exact(&mut b).ok()?;
+        String::from_utf8(b).ok()
+    };
+    let len = u32_(&mut f)?;
+    if !string(&mut f, len)?.starts_with("PKGV") {
+        return None;
+    }
+    let count = u32_(&mut f)?;
+    let mut found = None;
+    for _ in 0..count.min(1_000_000) {
+        let len = u32_(&mut f)?;
+        let entry = string(&mut f, len)?;
+        let (offset, size) = (u32_(&mut f)?, u32_(&mut f)?);
+        if entry == name {
+            found = Some((offset, size));
+        }
+    }
+    let (offset, size) = found?;
+    let data_start = f.stream_position().ok()?;
+    f.seek(SeekFrom::Start(data_start + offset as u64)).ok()?;
+    let mut b = vec![0u8; size as usize];
+    f.read_exact(&mut b).ok()?;
+    Some(b)
+}
+
+/// Why linux-wallpaperengine cannot render this scene, judged by its scene
+/// file; `None` if it looks fine or cannot be read (then we just try).
+pub fn unsupported_reason(root: &Path, file: Option<&str>) -> Option<String> {
+    let bytes = read_scene_file(root, file.unwrap_or("scene.json"))?;
+    let scene: Value = serde_json::from_slice(&bytes).ok()?;
+    let general = scene.get("general")?;
+    if general.get("orthogonalprojection").map_or(true, Value::is_null) {
+        return Some("3D-сцена с перспективной камерой (нет general.orthogonalprojection): linux-wallpaperengine такие не рисует".into());
+    }
+    None
+}
+
+/// Short crash reason from the renderer's last output lines: the last line
+/// that looks like an error, else the last non-empty one.
+pub fn crash_reason(lines: &[String], status: i32) -> String {
+    const MARKS: [&str; 7] = ["error", "exception", "failed", "missing", "must ", "cannot", "unsupported"];
+    let pick = lines
+        .iter()
+        .rev()
+        .find(|l| MARKS.iter().any(|m| l.to_lowercase().contains(m)))
+        .or_else(|| lines.iter().rev().find(|l| !l.trim().is_empty()));
+    match pick {
+        Some(l) => {
+            let l = l.trim();
+            let mut s: String = l.chars().take(300).collect();
+            if s.len() < l.len() {
+                s.push('…');
+            }
+            format!("рендерер сцен упал: {s}")
+        }
+        None => format!("рендерер сцен завершился при запуске (статус {status})"),
+    }
+}
+
 /// Control-channel lines for a pointer event (window coordinates, top-left origin).
 pub fn pointer_lines(kind: PointerKind, x: f64, y: f64, button: u32) -> String {
     let mut s = format!("m {x:.1} {y:.1}\n");
@@ -150,6 +228,54 @@ mod tests {
         assert!(a.windows(2).any(|w| w == ["--volume", "42"]));
         assert!(!a.contains(&"--silent".into()));
         assert!(!a.contains(&"--assets-dir".into()));
+    }
+
+    #[test]
+    fn detects_perspective_scenes() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.json"), r#"{"camera":{"eye":"0 0 3"},"general":{"clearcolor":"0 0 0"},"objects":[]}"#).unwrap();
+        std::fs::write(d.path().join("scene.json"), r#"{"general":{"orthogonalprojection":{"width":1920,"height":1080}}}"#).unwrap();
+        assert!(unsupported_reason(d.path(), Some("a.json")).unwrap().contains("orthogonalprojection"));
+        assert_eq!(unsupported_reason(d.path(), None), None);
+        assert_eq!(unsupported_reason(d.path(), Some("missing.json")), None);
+    }
+
+    #[test]
+    fn reads_scene_from_pkg() {
+        let d = tempfile::tempdir().unwrap();
+        let files: [(&str, &[u8]); 2] = [("materials/x.json", b"{}"), ("scene.json", br#"{"general":{}}"#)];
+        let s = |b: &mut Vec<u8>, t: &[u8]| {
+            b.extend((t.len() as u32).to_le_bytes());
+            b.extend(t);
+        };
+        let mut pkg = vec![];
+        s(&mut pkg, b"PKGV0022");
+        pkg.extend((files.len() as u32).to_le_bytes());
+        let mut off = 0u32;
+        for (n, data) in files {
+            s(&mut pkg, n.as_bytes());
+            pkg.extend(off.to_le_bytes());
+            pkg.extend((data.len() as u32).to_le_bytes());
+            off += data.len() as u32;
+        }
+        for (_, data) in files {
+            pkg.extend(data);
+        }
+        std::fs::write(d.path().join("scene.pkg"), pkg).unwrap();
+        assert_eq!(read_scene_file(d.path(), "scene.json").unwrap(), br#"{"general":{}}"#);
+        assert!(unsupported_reason(d.path(), Some("scene.json")).is_some());
+        assert_eq!(read_scene_file(d.path(), "nope.json"), None);
+    }
+
+    #[test]
+    fn crash_reasons() {
+        let l = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            crash_reason(&l(&["Running with: x", "General section must have orthogonal projection info", "bye"]), 1),
+            "рендерер сцен упал: General section must have orthogonal projection info"
+        );
+        assert_eq!(crash_reason(&l(&["a", "last line", ""]), 1), "рендерер сцен упал: last line");
+        assert!(crash_reason(&[], 139).contains("139"));
     }
 
     #[test]

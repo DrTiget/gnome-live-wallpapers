@@ -25,3 +25,8 @@ Pinned commit: `b016d7d` (master, 2026-06-09) — `UPSTREAM_COMMIT` in
   "Project type missing": the type is inferred from the main file. Note these two
   are 3D perspective scenes (no `orthogonalprojection`), which linux-wallpaperengine
   does not render yet, so they still fail one step later.
+
+`0003-exit-on-fatal-error.patch`: on a fatal error (bad `scene.json`, unsupported
+scene) print it and `_Exit(1)` instead of returning from `main`, whose static
+destructors (CEF, audio threads) could hang and leave a process without a window.
+wpe-daemon reads its output and marks such wallpapers `broken` with that line as reason.

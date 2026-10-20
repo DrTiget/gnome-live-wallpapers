@@ -165,7 +165,7 @@ fn show(monitor: String, project: Project) {
     if project.kind == ProjectType::Scene {
         let props = project.properties.to_user_properties();
         PROPS.with(|p| p.borrow_mut().insert(id.clone(), props.to_string()));
-        if let Some(p) = start_scene(&monitor, &project.root, &props) {
+        if let Some(p) = start_scene(&monitor, &id, &project.root, &props) {
             SURFACES.with(|s| s.borrow_mut().insert(monitor, Surface { window: None, wallpaper: id, content: Content::Scene(p), audio: false }));
         }
         return;
@@ -242,7 +242,7 @@ fn show(monitor: String, project: Project) {
     SURFACES.with(|s| s.borrow_mut().insert(monitor, Surface { window: Some(window), wallpaper: id, content, audio: false }));
 }
 
-fn start_scene(monitor: &str, root: &std::path::Path, props: &serde_json::Value) -> Option<SceneProc> {
+fn start_scene(monitor: &str, wallpaper: &str, root: &std::path::Path, props: &serde_json::Value) -> Option<SceneProc> {
     let (width, height) = gdk_monitor(monitor)
         .map(|m| (m.geometry().width(), m.geometry().height()))
         .unwrap_or((1920, 1080));
@@ -258,6 +258,8 @@ fn start_scene(monitor: &str, root: &std::path::Path, props: &serde_json::Value)
         // Property values (std::stof) and shaders must not see a comma decimal separator.
         .env("LC_NUMERIC", "C")
         .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
     {
         Ok(c) => c,
@@ -268,8 +270,26 @@ fn start_scene(monitor: &str, root: &std::path::Path, props: &serde_json::Value)
     };
     let pid = child.id();
     eprintln!("[scene] {monitor}: pid {pid} {}", root.display());
+    // Pass its output through to our log, keeping the tail for the crash reason.
+    let tail = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<String>::new()));
+    let outputs: [Option<Box<dyn std::io::Read + Send>>; 2] =
+        [child.stdout.take().map(|o| Box::new(o) as _), child.stderr.take().map(|e| Box::new(e) as _)];
+    for out in outputs.into_iter().flatten() {
+        let tail = tail.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                eprintln!("{line}");
+                let mut t = tail.lock().unwrap();
+                if t.len() == 40 {
+                    t.pop_front();
+                }
+                t.push_back(line);
+            }
+        });
+    }
     let alive = Rc::new(Cell::new(true));
-    let (alive2, mon) = (alive.clone(), monitor.to_string());
+    let (alive2, mon, id) = (alive.clone(), monitor.to_string(), wallpaper.to_string());
     glib::child_watch_add_local(glib::Pid(pid as i32), move |_, status| {
         alive2.set(false);
         eprintln!("[scene] {mon}: pid {pid} exited, status {status}");
@@ -280,6 +300,22 @@ fn start_scene(monitor: &str, root: &std::path::Path, props: &serde_json::Value)
             // Crashed on its own: forget it, the desktop falls back to the normal background.
             SURFACES.with(|s| s.borrow_mut().remove(&mon));
             dbus::set_renderer_pid(&mon, None);
+            // Give the output readers a moment to drain, then report it as broken.
+            let (tail, id) = (tail.clone(), id.clone());
+            glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || {
+                let lines: Vec<String> = tail.lock().unwrap().iter().cloned().collect();
+                let reason = scene::crash_reason(&lines, status);
+                eprintln!("[scene] {id}: broken: {reason}");
+                crate::core::RUNTIME_BROKEN.lock().unwrap().insert(id, reason);
+                dbus::emit_catalog_changed();
+            });
+        }
+    });
+    // Survived the start: no longer broken (e.g. fixed files, other settings).
+    let (alive3, id) = (alive.clone(), wallpaper.to_string());
+    glib::timeout_add_local_once(std::time::Duration::from_secs(20), move || {
+        if alive3.get() && crate::core::RUNTIME_BROKEN.lock().unwrap().remove(&id).is_some() {
+            dbus::emit_catalog_changed();
         }
     });
     let mut p = SceneProc { stdin: child.stdin.take(), child, root: root.to_path_buf(), alive };
@@ -309,7 +345,7 @@ fn restart_scenes(only: Option<&str>) {
             .with(|p| p.borrow().get(&wallpaper).cloned())
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or(serde_json::Value::Null);
-        match start_scene(&monitor, &root, &props) {
+        match start_scene(&monitor, &wallpaper, &root, &props) {
             Some(p) => SURFACES.with(|s| s.borrow_mut().insert(monitor, Surface { window: None, wallpaper, content: Content::Scene(p), audio: false })),
             None => {
                 dbus::set_renderer_pid(&monitor, None);
