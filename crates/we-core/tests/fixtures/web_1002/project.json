@@ -1,0 +1,33 @@
+{
+	"file" : "index.html",
+	"general" :
+	{
+		"localization" :
+		{
+			"en-us" : { "ui_clock" : "Show clock", "ui_speed" : "Speed" },
+			"ru-ru" : { "ui_clock" : "Показывать часы" }
+		},
+		"properties" :
+		{
+			"schemecolor" : { "order" : 0, "text" : "ui_browse_properties_scheme_color", "type" : "color", "value" : "255 128 0" },
+			"showclock" : { "order" : 100, "text" : "ui_clock", "type" : "bool", "value" : true },
+			"clockformat" : { "order" : 101, "text" : "Format", "type" : "combo", "condition" : "showclock.value == true",
+				"options" : [ { "label" : "24h", "value" : "24" }, { "label" : "12h", "value" : "12" } ], "value" : "24" },
+			"speed" : { "order" : 102, "text" : "ui_speed", "type" : "slider", "min" : 0, "max" : 10, "step" : 0.5, "fraction" : true, "value" : "2.5" },
+			"particles" : { "order" : 103, "text" : "Particles", "type" : "slider", "min" : 10, "max" : 500, "value" : 9999 },
+			"greeting" : { "order" : 104, "text" : "Greeting", "type" : "textinput", "value" : "Hello" },
+			"bg" : { "order" : 105, "text" : "Background image", "type" : "file" },
+			"photos" : { "order" : 106, "text" : "Photos", "type" : "directory", "mode" : "ondemand" },
+			"hdr" : { "order" : 107, "text" : "<h3>Advanced</h3>", "type" : "text" },
+			"grp" : { "order" : 108, "text" : "Group", "type" : "group" },
+			"legacyflag" : { "order" : 109, "text" : "Legacy", "type" : "bool", "value" : "1" },
+			"weird" : { "order" : 110, "text" : "Weird", "type" : "hologram", "value" : [1,2] }
+		},
+		"supportsaudioprocessing" : true
+	},
+	"preview" : "preview.jpg",
+	"tags" : [ "Abstract", "Audio responsive" ],
+	"title" : "Audio Bars",
+	"type" : "web",
+	"workshopid" : 1002
+}

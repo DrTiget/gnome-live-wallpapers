@@ -1,0 +1,2 @@
+{ "dependency" : "1002", "preset" : { "speed" : 7, "showclock" : false, "bogus" : 1 },
+  "title" : "Audio Bars (fast, no clock)", "type" : "preset", "workshopid" : "1005" }

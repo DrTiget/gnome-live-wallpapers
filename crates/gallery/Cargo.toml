@@ -1,0 +1,17 @@
+[package]
+name = "wpe-gallery"
+description = "Wallpaper gallery and settings (GTK4/libadwaita)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+gtk = ["dep:gtk4", "dep:libadwaita"]
+
+[dependencies]
+we-core.workspace = true
+serde_json.workspace = true
+zbus = "5"
+gtk4 = { version = "0.11", optional = true }
+libadwaita = { version = "0.9", optional = true }

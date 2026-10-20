@@ -1,0 +1,9 @@
+{
+	"file" : "scene.json",
+	"general" : { "properties" : { "bloom" : { "order" : 1, "text" : "Bloom", "type" : "bool", "value" : false },
+		"tex" : { "order" : 2, "text" : "Texture", "type" : "scenetexture", "value" : "" } } },
+	"preview" : "preview.jpg",
+	"title" : "Neon Scene",
+	"type" : "scene",
+	"workshopid" : "1003"
+}

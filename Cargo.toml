@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/we-core", "crates/daemon", "crates/gallery"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+rust-version = "1.80"
+
+[workspace.dependencies]
+we-core = { path = "crates/we-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

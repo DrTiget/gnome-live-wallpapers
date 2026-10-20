@@ -1,0 +1,8 @@
+{
+  "uuid": "wpe@wpe.github.io",
+  "name": "WPE Live Wallpaper",
+  "description": "Places wpe-daemon renderer windows as the desktop background, forwards pointer input and pauses when covered.",
+  "shell-version": ["50"],
+  "url": "https://github.com/wpe/wpe",
+  "version": 1
+}

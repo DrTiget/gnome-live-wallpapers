@@ -1,0 +1,51 @@
+// Wallpaper Engine web API shim, injected at document start into every web wallpaper.
+// The daemon calls window.__wpe.* via WebView.evaluate_javascript().
+(function () {
+  "use strict";
+  const audioListeners = [];
+  const pausedListeners = [];
+  let pending = null; // properties received before the page registered its listener
+
+  window.wallpaperRegisterAudioListener = function (cb) { audioListeners.push(cb); };
+  window.wallpaperRegisterPausedListener = function (cb) { pausedListeners.push(cb); };
+  window.wallpaperRequestRandomFileForProperty = function (_key, cb) { /* stage 3 */ };
+
+  let listener = window.wallpaperPropertyListener;
+  Object.defineProperty(window, "wallpaperPropertyListener", {
+    configurable: true,
+    get() { return listener; },
+    set(v) {
+      listener = v;
+      if (pending && v && v.applyUserProperties) { v.applyUserProperties(pending); }
+    },
+  });
+
+  window.__wpe = {
+    applyUserProperties(props) {
+      pending = Object.assign(pending || {}, props);
+      if (listener && listener.applyUserProperties) listener.applyUserProperties(props);
+    },
+    applyGeneralProperties(props) {
+      if (listener && listener.applyGeneralProperties) listener.applyGeneralProperties(props);
+    },
+    setPaused(paused) {
+      if (listener && listener.setPaused) listener.setPaused(paused);
+      pausedListeners.forEach((cb) => cb({ paused }));
+    },
+    // 128 floats: 64 left + 64 right channel, 0..~1.
+    audio(samples) { for (const cb of audioListeners) cb(samples); },
+    // Synthesised pointer events from the GNOME extension (desktop is below all windows).
+    pointer(kind, x, y, button) {
+      const target = document.elementFromPoint(x, y) || document.body;
+      const init = { clientX: x, clientY: y, screenX: x, screenY: y, button: Math.max(0, button - 1),
+                     buttons: kind === "release" ? 0 : (button ? 1 << (button - 1) : 0), bubbles: true, cancelable: true, view: window };
+      if (kind === "motion") { target.dispatchEvent(new MouseEvent("mousemove", init)); target.dispatchEvent(new PointerEvent("pointermove", init)); }
+      else if (kind === "press") { target.dispatchEvent(new PointerEvent("pointerdown", init)); target.dispatchEvent(new MouseEvent("mousedown", init)); }
+      else if (kind === "release") {
+        target.dispatchEvent(new PointerEvent("pointerup", init));
+        target.dispatchEvent(new MouseEvent("mouseup", init));
+        if (button === 1) target.dispatchEvent(new MouseEvent("click", init));
+      }
+    },
+  };
+})();
