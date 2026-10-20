@@ -27,7 +27,7 @@
 |---|---|
 | `crates/we-core` | парсинг `project.json` (все типы: video, web, scene, preset, application; без `type` — по расширению `file`, в т.ч. `.exe` → application), свойства `general.properties`, локализация, валидация, сканер Steam-библиотек (`libraryfolders.vdf`, native/Flatpak/Snap Steam), пресеты. Без зависимостей от GTK, полностью покрыт тестами. |
 | `crates/daemon` (`wpe-daemon`) | D-Bus сервис + рендерер. Без фичи `gtk` — headless (логирует команды рендеру; удобно для отладки GUI/расширения). С `--features gtk` — настоящий рендерер. |
-| `crates/gallery` (`wpe-gallery`) | этап 1: CLI поверх D-Bus; этап 3: libadwaita-галерея. |
+| `crates/gallery` (`wpe-gallery`) | без аргументов — libadwaita-галерея (`gui.rs`, фича `gtk`), с аргументами — CLI поверх D-Bus (`main.rs`). Галерея опрашивает демон раз в 2 с и хранит всё состояние в демоне. |
 | `gnome-extension/wpe@wpe.github.io` | расширение Shell 50. |
 
 ### Демон
@@ -48,7 +48,7 @@
 
 | Метод | Сигнатура | Кто вызывает |
 |---|---|---|
-| `ListWallpapers() → s` | JSON `[{id,title,type,supported,preview,root,tags,audio,rating}]` | галерея |
+| `ListWallpapers() → s` | JSON `[{id,title,type,supported,status,reason,preview,root,tags,audio,rating}]`; `status`: `ok` / `unsupported` (тип не поддерживается, 3D-сцена с перспективной камерой) / `broken` (проблемы валидации или рендерер упал при старте), `reason` — причина | галерея |
 | `Rescan()` | пересканировать Workshop + `~/.local/share/wpe/wallpapers` + `extra_dirs` | галерея |
 | `SetWallpaper(s monitor, s id)` | `monitor` = connector или `"*"`; пустой `id` снимает | галерея |
 | `GetAssignments() → a{ss}` | | галерея |
@@ -59,13 +59,15 @@
 | `SetPaused(s monitor, b paused)` | монитор закрыт (развёрнутое/полноэкранное окно или окно >90% монитора) или экран заблокирован; решение о паузе принимает демон по настройкам | расширение |
 | `SetFullscreenActive(b active)` | на каком-то мониторе полноэкранное приложение (fullscreen или фокусное окно на весь монитор вместе с панелью) | расширение |
 | `SetPauseOnMaximized(b)` / `SetPauseOnFullscreenAny(b)` | настройки паузы (в `state.json`, по умолчанию вкл.; в `GetSettings`) | галерея |
+| `GetSettings() → s` | JSON `{fps, volume, muted, pause_on_maximized, pause_on_fullscreen_any, monitors, directories}` | галерея |
 | `SetMonitors(as connectors)` | раскладка мониторов изменилась | расширение |
 | `SetVolume(d volume, b muted)` | | галерея |
 | `AddDirectory(s path)` | добавить каталог с обоями (сохраняется в `extra_dirs`), пересканировать | галерея |
+| `RemoveDirectory(s path)` | убрать каталог из `extra_dirs`, пересканировать | галерея |
 | `GetRendererPids() → a{su}` | монитор → PID процесса сцены, чтобы расширение нашло его окно; изменения — сигнал `RendererPidsChanged()` | расширение |
 | `SetFps(u fps)` / `GetFps() → u` | лимит FPS (1..240, по умолчанию 30, в `state.json`): сцены (перезапуск) и `requestAnimationFrame` web-обоев | галерея |
 
-Свойство `Version (s)`. Сигналы: `CatalogChanged()`, `AssignmentsChanged()`, `PropertiesChanged(s id)`, `RendererPidsChanged()`.
+Свойство `Version (s)`. Сигналы (`CatalogChanged` — после `Rescan`/`AddDirectory`/`RemoveDirectory`): `CatalogChanged()`, `AssignmentsChanged()`, `PropertiesChanged(s id)`, `RendererPidsChanged()`.
 
 Демон стартует как systemd user unit (`wpe-daemon.service`, `PartOf=graphical-session.target`) и/или D-Bus activation.
 
@@ -102,7 +104,7 @@ Wayland-ограничение: клиент не может сам стать �
 * Обновление апстрима — просто пересборка бинарника (подмодуль `third_party/linux-wallpaperengine`, пиннинг коммита).
 
 Как сделано (этап 2):
-* Сборка — `scripts/build-scene-renderer.sh`: апстрим, пиннинг коммита, наш патч `third_party/linux-wallpaperengine/0001-control-stdin.patch`, установка в `~/.local/lib/linux-wallpaperengine` (RPATH `$ORIGIN`, рядом рантайм CEF) + симлинк `~/.local/bin/linux-wallpaperengine`. Демон ищет бинарник в `$WPE_SCENE_BIN`, `~/.local/bin`, затем в `PATH` (у systemd user unit `~/.local/bin` в PATH обычно нет).
+* Сборка — `scripts/build-scene-renderer.sh`: апстрим, пиннинг коммита, наши патчи `third_party/linux-wallpaperengine/000*.patch` (0001 — `--control-stdin`, 0002 — захват звука и тип проекта по файлу, 0003 — выход при фатальной ошибке; подробности в `third_party/linux-wallpaperengine/README.md`), установка в `~/.local/lib/linux-wallpaperengine` (RPATH `$ORIGIN`, рядом рантайм CEF) + симлинк `~/.local/bin/linux-wallpaperengine`. Демон ищет бинарник в `$WPE_SCENE_BIN`, `~/.local/bin`, затем в `PATH` (у systemd user unit `~/.local/bin` в PATH обычно нет).
 * Запуск: `linux-wallpaperengine --control-stdin --no-fullscreen-pause --window 0x0x<W>x<H> --scaling fill --fps <N> --silent|--volume <0..100> --assets-dir <Steam>/common/wallpaper_engine/assets [--set-property key=value…] <каталог>`; `LC_NUMERIC=C` (значения парсятся `std::stof`). Свойства: bool → `1/0`, цвет `"r g b"`, числа и строки как есть, пустые файлы пропускаются. На Mutter нет wlr-layer-shell, поэтому `--screen-root` неприменим — оконный режим (GLFW, Wayland). Позиция окна игнорируется Wayland — её выставляет расширение.
 * Окно находит расширение по PID и ставит в фон так же, как наши окна (не сворачивается, полный размер монитора, скрытый актёр + клон).
 * Управляющий канал (патч `--control-stdin`, строки в stdin): `m x y` — курсор (координаты окна, от левого верхнего угла), `b l|r 0|1` — кнопки, `p 0|1` — пауза (цикл рендера спит, как при собственной fullscreen-паузе апстрима), `q` — выход; EOF тоже завершает процесс, так что падение демона не оставляет сирот. Почему не SIGSTOP: остановленный Wayland-клиент не отвечает на ping композитора («приложение не отвечает»), а при паузе процесс жив и отвечает. Курсор от расширения (`PointerEvent`) уходит в `GLFWMouseInput` вместо `glfwGetCursorPos`, поэтому параллакс и курсорные эффекты работают, хотя настоящее окно ввода не получает.
@@ -117,5 +119,5 @@ Wayland-ограничение: клиент не может сам стать �
 
 1. **MVP: Video + Web с интерактивом на фоне** — готово и проверено в headless GNOME Shell 50.1 на NVIDIA 580 (1 и 2 монитора, режимы `user` и `ubuntu` с DING): we-core, D-Bus API, GTK-рендерер Video/Web + шим, расширение (фон, скрытие окон, курсор/клики, пауза), CLI `wpe-gallery`, systemd user unit, `scripts/install.sh`.
 2. **Сцены** — готово (см. выше): сборка с патчем, подпроцесс в окне по PID, пауза/курсор через `--control-stdin`, свойства/FPS/громкость с перезапуском. Проверено в headless GNOME Shell на реальных сценах (`WPE_SCENES=… scripts/nested-test.sh`).
-3. **Аудио + галерея**: PipeWire → FFT → `wallpaperRegisterAudioListener`; libadwaita-галерея: сетка превью (GIF/JPG), фильтры по типу/тегам/поиск (`Catalog::search`), выбор монитора, редактор свойств, генерируемый по `PropertyKind` (color → `GtkColorDialogButton`, slider → `GtkScale`, combo → `AdwComboRow`, bool → `AdwSwitchRow`, text → `AdwEntryRow`, file/directory → `GtkFileDialog`), с учётом `condition` (простое вычисление `key.value == X`), локализация через `Project::localize`.
+3. **Аудио + галерея** — готово (аудио: `audio.rs`; галерея: `crates/gallery/src/gui.rs`; ниже исходный план, часть пунктов — `condition`, локализация свойств, GIF — ещё не сделана): PipeWire → FFT → `wallpaperRegisterAudioListener`; libadwaita-галерея: сетка превью (GIF/JPG), фильтры по типу/тегам/поиск (`Catalog::search`), выбор монитора, редактор свойств, генерируемый по `PropertyKind` (color → `GtkColorDialogButton`, slider → `GtkScale`, combo → `AdwComboRow`, bool → `AdwSwitchRow`, text → `AdwEntryRow`, file/directory → `GtkFileDialog`), с учётом `condition` (простое вычисление `key.value == X`), локализация через `Project::localize`.
 4. Дальше: плейлисты, импорт `.pkg`/распаковка, автозапуск, энергосбережение (пауза на батарее), web-свойства `directory` (`wallpaperRequestRandomFileForProperty`).

@@ -1,9 +1,14 @@
 {
   "uuid": "wpe@wpe.github.io",
   "name": "WPE Live Wallpaper",
-  "description": "Shows wpe-daemon wallpapers (video, web) as the desktop background, forwards pointer input to them and pauses them when covered by maximized/fullscreen windows.",
-  "shell-version": ["50"],
-  "session-modes": ["user", "unlock-dialog"],
-  "url": "https://github.com/wpe/wpe",
+  "description": "Shows wpe-daemon wallpapers (video, web, scenes) as the desktop background, forwards pointer input to them and pauses them when covered by maximized/fullscreen windows. License: GPL-3.0-or-later.",
+  "shell-version": [
+    "50"
+  ],
+  "session-modes": [
+    "user",
+    "unlock-dialog"
+  ],
+  "url": "https://github.com/DrTiget/gnome-live-wallpapers",
   "version": 1
 }

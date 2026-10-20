@@ -4,6 +4,7 @@ description = "Wallpaper renderer daemon (one window per monitor) with D-Bus API
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "wpe-daemon"

@@ -1,27 +1,46 @@
-# WPE — живые обои для GNOME (Wayland)
+# Живые обои для GNOME (WPE)
 
-Аналог Wallpaper Engine для Ubuntu 26.04 / GNOME Shell 50: видео, web (HTML с интерактивом),
-сцены (через [linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine)),
-аудиореактивность. Обои импортируются из Steam Workshop Wallpaper Engine (appid 431960).
+**English:** WPE is a live-wallpaper engine for GNOME Shell 50 on Wayland (tested on Ubuntu 26.04 with NVIDIA).
+It plays video, interactive web and Wallpaper Engine *scene* wallpapers (Steam Workshop, appid 431960) as the
+desktop background, forwards pointer input to them, feeds web wallpapers with an audio spectrum, pauses when a
+window covers the monitor, supports several monitors and ships a libadwaita gallery (GUI) and a CLI.
+Scenes are rendered by a patched [linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine).
+Docs are in Russian; code and comments are in English. License: GPL-3.0-or-later.
 
-Архитектура и план: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Лицензия: GPL-3.0-or-later.
+---
 
-## Состояние
+Аналог Wallpaper Engine для **Ubuntu 26.04 / GNOME Shell 50 (Wayland)**: видео, web-обои с интерактивом и
+сцены Wallpaper Engine из Steam Workshop прямо на рабочем столе, под всеми окнами.
 
-| часть | статус |
-|---|---|
-| `we-core` | готово, тесты зелёные; проверено на реальных данных: 19 стандартных проектов WE и 7 обоев из Workshop (`wpe-gallery scan -v <каталог>` — тип, свойства, проблемы) |
-| `wpe-daemon --features gtk` | этап 1 готов: видео (loop, без звука, cover) и web (WebKitGTK 6 + шим API WE: свойства, курсор/клики, пауза, аудио-API), окно на монитор, hotplug |
-| `wpe-daemon` без `gtk` | headless: D-Bus, каталог, state — для разработки GUI/расширения |
-| `wpe-gallery` | без аргументов — GTK4/libadwaita GUI «Живые обои» (сетка превью, поиск/фильтр/сортировка, выбор монитора, свойства из project.json, настройки FPS/звука/каталогов, серые неподдерживаемые; [скриншот](docs/screenshots/gallery-grid.png)); с аргументами — CLI (`list/scan/add-dir/set/props/prop/volume`) |
-| `gnome-extension` | готово: окно рендерера → фон под всеми окнами (и в обзоре), скрыто из обзора/alt-tab/дока, курсор/клики с пустого рабочего стола (и поверх DING), пауза при maximized/fullscreen и блокировке |
-| сцены | этап 2 готов: linux-wallpaperengine (наш патч `--control-stdin`) в окне, найденном по PID, фоном; курсор/параллакс, пауза, свойства, FPS (`wpe-gallery fps 30`), звук выключен по умолчанию |
-| аудиоспектр | этап 3 готов: web — захват монитора выхода по умолчанию (`pw-record`), FFT → 64+64 полосы, 30 Гц в `wallpaperRegisterAudioListener`, только пока видимые (не на паузе) обои зарегистрировали listener; сцены — захват самого linux-wallpaperengine (патч 0002: один поток, пауза = cork) |
-| статусы | `ListWallpapers`: сцены без `general.orthogonalprojection` в scene.json (3D с перспективной камерой; читается и из `scene.pkg`) — `unsupported`, их нельзя назначить; сцена, чей рендерер упал при запуске, — `broken` с причиной из его вывода (до успешного запуска, сигнал `CatalogChanged`) |
-| нагрузка и пауза | web: лимит FPS для `requestAnimationFrame`, на NVIDIA DMA-BUF + GL-рендерер GTK (12–15% CPU на монитор 1080p при 30 FPS); видео — GStreamer с аппаратным декодированием; пауза монитора под развёрнутым/полноэкранным окном или окном >90%, и всех мониторов при полноэкранном приложении на любом (настройки в галерее) |
-| GUI-галерея | этап 3 |
+![Галерея](docs/screenshots/gallery-grid.png)
 
-## Зависимости (Ubuntu 26.04)
+## Возможности
+
+- **Video** — зацикленное видео, масштаб «cover», аппаратное декодирование (NVIDIA `nvcodec`), звук выключен по умолчанию.
+- **Web** — HTML-обои в WebKitGTK 6 с шимом API Wallpaper Engine: свойства (`applyUserProperties`), курсор и клики,
+  пауза, лимит FPS.
+- **Scene** — сцены WE через подпроцесс [linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine)
+  (с нашими патчами): курсор/параллакс, свойства, FPS, звук.
+- **Интерактив** — курсор и клики с пустого рабочего стола (в том числе поверх Desktop Icons NG) доходят до обоев.
+- **Аудиоспектр** — захват монитора выхода по умолчанию через PipeWire, 64+64 полосы, 30 Гц для web-обоев
+  (`wallpaperRegisterAudioListener`) и сцен.
+- **Пауза** — при развёрнутом/полноэкранном окне, закрывающем монитор, при блокировке экрана; отдельно — при
+  полноэкранном приложении на любом мониторе (игры). Настраивается.
+- **Несколько мониторов** — свои обои на каждый монитор или одни на все, горячее подключение.
+- **Галерея** — GTK4/libadwaita: сетка превью, поиск, фильтр по типу, сортировка, выбор монитора, редактор свойств
+  (slider, bool, combo, color, textinput), настройки FPS/звука/паузы/каталогов, серые неподдерживаемые обои.
+- **CLI** — `wpe-gallery` с аргументами; D-Bus API для своих интеграций.
+
+![Настройки](docs/screenshots/gallery-settings.png)
+
+## Требования
+
+- Ubuntu 26.04 (или другой дистрибутив с **GNOME Shell 50**), сеанс **Wayland**.
+- Проверено на NVIDIA (проприетарный драйвер 580, GTX 1660 SUPER). На других GPU не проверялось.
+- Rust (через rustup), `sudo` нужен только для `apt`; установка WPE идёт в `$HOME`.
+- Для сцен и встроенных обоев — купленный Wallpaper Engine в Steam.
+
+## Установка
 
 ```sh
 sudo apt install build-essential pkg-config git curl \
@@ -29,70 +48,126 @@ sudo apt install build-essential pkg-config git curl \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-gl gstreamer1.0-gtk4 \
   libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev
-# сцены: сборка linux-wallpaperengine (проверено на Ubuntu 26.04)
+curl https://sh.rustup.rs -sSf | sh            # Rust без sudo
+
+git clone https://github.com/DrTiget/gnome-live-wallpapers.git
+cd gnome-live-wallpapers
+scripts/install.sh      # сборка и установка в ~/.local: wpe-daemon, wpe-gallery, systemd --user unit,
+                        # расширение GNOME Shell, .desktop и иконка
+```
+
+**Сцены** (по желанию, ~15 минут, ~1,5 ГБ вместе с CEF):
+
+```sh
 sudo apt install cmake libglfw3-dev libglew-dev libglm-dev libsdl2-dev liblz4-dev \
   libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev libmpv-dev libpulse-dev \
   libfftw3-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev \
   libwayland-dev wayland-protocols libxkbcommon-dev libegl-dev libgl-dev libfreetype-dev \
   libpng-dev libgmp-dev libffi-dev libdbus-1-dev libzstd-dev
-# freeglut3-dev апстрим требует, но не использует; наш патч делает GLUT необязательным
+scripts/build-scene-renderer.sh   # → ~/.local/lib/linux-wallpaperengine + симлинк в ~/.local/bin
 ```
 
-Для сцен нужен купленный Wallpaper Engine в Steam (его `assets/` и встроенные проекты находятся автоматически).
-Сборка и установка рендерера сцен (без sudo, ~15 мин, ~1.5 ГБ с CEF):
+### Первый запуск
+
+1. **Выйдите из сеанса и войдите снова.** Wayland подхватывает новые расширения GNOME Shell только при входе.
+   `install.sh` уже включил расширение, демон стартует вместе с сеансом.
+2. Проверьте: `gnome-extensions info wpe@wpe.github.io` (должно быть `State: ACTIVE`).
+3. Откройте **«Живые обои»** в меню приложений (или `wpe-gallery`), выберите обои, нажмите «Применить».
+
+Если демон не запущен, галерея предложит его запустить (`systemctl --user start wpe-daemon`).
+
+## Использование
+
+### GUI
+
+Клик по карточке — панель свойств справа; двойной клик или «Применить» — поставить обои на выбранный монитор
+(«Все мониторы» или конкретный). Текущие обои помечены. Свойства применяются сразу. Меню → «Настройки»:
+лимит FPS, звук и громкость, пауза, каталоги библиотек, пересканирование. Переключатель
+«Показать неподдерживаемые» показывает серым обои, которые демон не умеет рисовать (с причиной).
+
+### CLI
+
+Без аргументов `wpe-gallery` открывает GUI; с аргументами — CLI поверх D-Bus (демон должен работать).
+
+| Команда | Что делает |
+|---|---|
+| `wpe-gallery list` | список обоев: id, тип, название |
+| `wpe-gallery set <монитор\|'*'> <id>` | поставить обои (`DP-1`, `HDMI-1`… или `'*'` — все); пустой id (`''`) снимает |
+| `wpe-gallery props <id>` | свойства обоев (JSON) с текущими значениями |
+| `wpe-gallery prop <id> <ключ> <json>` | задать свойство, например `prop web-interactive schemecolor '"1 0.3 0.1"'` |
+| `wpe-gallery volume <0..1> <muted:true\|false>` | громкость и mute (по умолчанию звук выключен) |
+| `wpe-gallery fps [1..240]` | показать / задать лимит FPS (по умолчанию 30) |
+| `wpe-gallery add-dir <каталог>` | добавить каталог с обоями и пересканировать |
+| `wpe-gallery scan [-v] <каталог>` | офлайн-разбор каталога без демона (`-v` — свойства и проблемы) |
+
+## Где брать обои
+
+- **Wallpaper Engine из Steam** (через Proton): обои Workshop и встроенные проекты находятся автоматически
+  (native/Flatpak/Snap Steam, все библиотеки из `libraryfolders.vdf`). Подпишитесь на обои в Workshop
+  (appid 431960) — они появятся в галерее после пересканирования.
+- **Свои обои**: каталог с `project.json` в `~/.local/share/wpe/wallpapers/<имя>/` либо любая папка через
+  «Добавить папку» / `wpe-gallery add-dir`. Примеры — в `examples/`.
+
+## Настройки и файлы
+
+Состояние — `~/.config/wpe/state.json`: назначения монитор → обои, значения свойств, дополнительные каталоги,
+громкость, FPS, настройки паузы. Файл создаётся демоном, править вручную при остановленном демоне.
+
+## Совместимость
+
+| Тип | Статус |
+|---|---|
+| Video | работает |
+| Web | работает; интерактив, свойства, аудиоспектр, пауза |
+| Scene (2D, `orthogonalprojection`) | работает через linux-wallpaperengine; возможны артефакты отдельных шейдеров/эффектов |
+| Scene с перспективной камерой (3D) | **не поддерживается** апстримом (например `audiophile`, `techno`) — серые в галерее |
+| Preset | работает (разрешается в базовые обои + значения пресета) |
+| Application (`.exe`) | **не поддерживается**, только Windows |
+| Свойства `file` / `directory` / `scenetexture` | в галерее не редактируются |
+| X11-сеанс, другие версии GNOME | не поддерживаются (расширение `shell-version: 50`) |
+
+Сцена, у которой рендерер упал при старте, помечается «Не работает» с причиной, монитор остаётся с обычным фоном.
+
+## Диагностика
 
 ```sh
-scripts/build-scene-renderer.sh     # → ~/.local/lib/linux-wallpaperengine, симлинк ~/.local/bin/linux-wallpaperengine
-```
-
-Rust — через rustup (без sudo): `curl https://sh.rustup.rs -sSf | sh`.
-
-## Сборка и тесты
-
-```sh
-cargo test --workspace                        # we-core + headless daemon
-node scripts/test-shim.mjs                    # JS-шим API Wallpaper Engine
-cargo build --release -p wpe-daemon --features gtk
-cargo build --release -p wpe-gallery --features gtk   # без --features gtk — только CLI
-WPE_GUI=1 scripts/nested-test.sh              # GUI галереи в nested-сессии: /tmp/wpe-nested/gui-*.png (WPE_GUI_ACTIONS — действия rd-probe; OUT и WPE_NESTED_DISPLAY разводят параллельные запуски)
-scripts/nested-test.sh                        # интеграционный тест в отдельной headless GNOME Shell
-WPE_SHELL_MODE=ubuntu WPE_MONITORS="1280x720 1024x768" scripts/nested-test.sh
-WPE_SCENES="beach 3582604159" scripts/nested-test.sh  # сцены: скриншоты, FPS, CPU/GPU, курсор, пауза, свойства
-WPE_CPU="web-interactive video-test" scripts/nested-test.sh  # CPU по процессам
-WPE_PAUSE=1 WPE_MONITORS="1920x1080 1280x720" WPE_EXT_SRC=gnome-extension/wpe@wpe.github.io scripts/nested-test.sh  # решения о паузе
-WPE_AUDIO=1 WPE_AUDIO_SCENES=3479671230 scripts/nested-test.sh  # аудиоспектр: свой pipewire+wireplumber
-                         # (без устройств, null-sink по умолчанию), тестовый тон 220 Гц L / 3 кГц R
-```
-
-`nested-test.sh` не трогает текущую сессию (свой D-Bus, GSettings в keyfile, свои `XDG_*`),
-скриншоты и логи — в `/tmp/wpe-nested/`. Тестовые обои: `examples/` (видео генерируется
-`examples/make-test-video.sh`; `examples/web-audio` — визуализатор спектра), путь задаётся `WPE_TEST_DIR` (по умолчанию `~/wpe-test`; можно указать `examples/` после `make-test-video.sh`).
-
-## Установка (без sudo)
-
-```sh
-scripts/install.sh       # ~/.local/bin/wpe-{daemon,gallery}, systemd --user unit (enable),
-                         # расширение в ~/.local/share/gnome-shell/extensions + включение
-# выйти из сеанса и войти снова (Wayland подхватывает новые расширения только так)
-wpe-gallery add-dir ~/wpe-test        # или обои из Steam Workshop находятся сами
-wpe-gallery list
-wpe-gallery set '*' web-interactive   # '*' — все мониторы, или DP-1 / HDMI-1 …
-wpe-gallery prop web-interactive schemecolor '"1 0.3 0.1"'
-wpe-gallery volume 0.5 false          # включить звук (по умолчанию выключен)
-scripts/install.sh --uninstall
-```
-
-Состояние: `~/.config/wpe/state.json`. Свои обои без Steam: `~/.local/share/wpe/wallpapers/<имя>/project.json`.
-
-Диагностика:
-
-```sh
-gnome-extensions info wpe@wpe.github.io     # State: ACTIVE
+gnome-extensions info wpe@wpe.github.io          # State: ACTIVE?
 systemctl --user status wpe-daemon
-journalctl --user -u wpe-daemon -f          # демон
-journalctl -f /usr/bin/gnome-shell | grep wpe   # расширение
-systemctl --user stop wpe-daemon            # убрать обои немедленно
+journalctl --user -u wpe-daemon -f               # демон
+journalctl -f /usr/bin/gnome-shell | grep -i wpe # расширение
+systemctl --user stop wpe-daemon                 # убрать обои немедленно
+scripts/install.sh --uninstall                   # удалить (состояние ~/.config/wpe сохраняется)
 ```
 
-Отладка: `WPE_DEBUG=1` (демон логирует команды рендеру), `WPE_NOHIDE=1` (обычные окна с рамкой,
-без расширения), `WPE_EXT_DEBUG=1` в окружении gnome-shell (лог ввода/геометрии расширения).
+Отладка: `WPE_DEBUG=1` (демон логирует команды рендеру и консоль JS), `WPE_NOHIDE=1` (обычные окна с рамкой, без
+расширения), `WPE_EXT_DEBUG=1` в окружении gnome-shell (лог расширения), `WPE_SCENE_BIN` — путь к linux-wallpaperengine.
+
+## FAQ
+
+**Обоев не видно после установки.** Нужен перелогин; затем `gnome-extensions info wpe@wpe.github.io` и
+`systemctl --user status wpe-daemon`.
+
+**Почему нужно расширение?** В Mutter нет wlr-layer-shell, клиент не может стать фоном; расширение клонирует окно
+рендерера в фон рабочего стола. Без расширения демон окон не создаёт.
+
+**Работает ли на X11 / GNOME 49 и старше?** Нет, цель — GNOME 50 на Wayland.
+
+**Звука нет.** Он выключен по умолчанию: «Настройки → Звук обоев» или `wpe-gallery volume 0.5 false`.
+
+**Нагрузка на CPU/GPU.** Снизьте лимит FPS; обои на паузе под развёрнутыми окнами не рисуются.
+
+**Сцена показывается серой / «Не работает».** 3D-сцены и часть шейдеров апстрим не умеет; причина — в подсказке карточки.
+
+## Документация
+
+[Архитектура](docs/ARCHITECTURE.md) · [Разработка](docs/DEVELOPMENT.md) · [Участие](CONTRIBUTING.md) · [История изменений](CHANGELOG.md)
+
+## Лицензия
+
+GPL-3.0-or-later, см. [LICENSE](LICENSE).
+
+## Благодарности
+
+- [linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine) (Almamu) — рендерер сцен.
+- [Hanabi](https://github.com/jeffshee/gnome-ext-hanabi) (jeffshee) — идея и подход расширения: окно как фон рабочего стола.
+- Wallpaper Engine (Steam) и авторы обоев Workshop. Проект не связан с Wallpaper Engine и Valve.
