@@ -4,7 +4,7 @@
 
 use zbus::blocking::{Connection, Proxy};
 
-const USAGE: &str = "usage: wpe-gallery list | scan <dir> | add-dir <dir> | volume <0..1> <muted:true|false> | set <monitor|*> <id> | props <id> | prop <id> <key> <json>";
+const USAGE: &str = "usage: wpe-gallery list | scan [-v] <dir> | add-dir <dir> | volume <0..1> <muted:true|false> | set <monitor|*> <id> | props <id> | prop <id> <key> <json>";
 
 fn proxy(conn: &Connection) -> zbus::Result<Proxy<'_>> {
     Proxy::new(conn, "io.github.wpe.Daemon", "/io/github/wpe/Daemon", "io.github.wpe.Daemon1")
@@ -15,6 +15,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     match a.as_slice() {
         // Offline: scan a directory directly with we-core.
+        ["scan", "-v", dir] => {
+            let cat = we_core::Catalog::scan(&[dir]);
+            for p in &cat.projects {
+                let issues = p.validate();
+                let unknown: Vec<String> = p
+                    .properties
+                    .iter()
+                    .filter_map(|x| match &x.kind {
+                        we_core::PropertyKind::Unknown { type_name, .. } => Some(format!("{}:{}", x.key, type_name)),
+                        _ => None,
+                    })
+                    .collect();
+                println!(
+                    "{:<12} {:<11} props={:<3} audio={} {}{}{}",
+                    p.id(),
+                    p.kind.as_str(),
+                    p.properties.len(),
+                    p.supports_audio as u8,
+                    p.title,
+                    if issues.is_empty() { String::new() } else { format!("  ISSUES {issues:?}") },
+                    if unknown.is_empty() { String::new() } else { format!("  UNKNOWN {unknown:?}") },
+                );
+            }
+            for e in &cat.errors {
+                eprintln!("error: {}: {}", e.dir.display(), e.error);
+            }
+        }
         ["scan", dir] => {
             let cat = we_core::Catalog::scan(&[dir]);
             for p in &cat.projects {

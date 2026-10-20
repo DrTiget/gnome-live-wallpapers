@@ -101,7 +101,8 @@ def main():
             x, y = map(float, arg.split(","))
             rd("NotifyPointerMotionAbsolute", "(sdd)", (stream, x, y))
             if kind == "click":
-                time.sleep(0.05)
+                # the first absolute motion of a session is applied late
+                time.sleep(0.3)
                 rd("NotifyPointerButton", "(ib)", (BTN_LEFT, True))
                 time.sleep(0.05)
                 rd("NotifyPointerButton", "(ib)", (BTN_LEFT, False))

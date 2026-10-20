@@ -48,7 +48,7 @@ $G list
 ID=${WPE_ID:-web-interactive}
 $G set '*' "$ID"
 sleep 6
-python3 scripts/rd-probe.py "$OUT/$ID-" shot:1 click:800,450 sleep:1.5 shot:1b move:300,250 sleep:0.05 move:400,300 sleep:0.05 move:500,350 sleep:0.05 move:600,400 sleep:0.05 move:700,450 click:800,450 shot:2-input
+python3 scripts/rd-probe.py "$OUT/$ID-" shot:1 move:800,450 sleep:0.5 move:810,460 sleep:0.3 click:800,450 sleep:1.5 shot:1b move:300,250 sleep:0.05 move:400,300 sleep:0.05 move:500,350 sleep:0.05 move:600,400 sleep:0.05 move:700,450 click:800,450 shot:2-input
 $G prop "$ID" message '"Changed over D-Bus"' 2>/dev/null
 $G prop "$ID" schemecolor '"1 0.2 0.2"' 2>/dev/null
 sleep 1

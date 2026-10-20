@@ -1,6 +1,8 @@
 mod core;
 mod dbus;
 mod state;
+#[cfg_attr(not(feature = "gtk"), allow(dead_code))]
+mod webpath;
 #[cfg(feature = "gtk")]
 mod gtk_renderer;
 

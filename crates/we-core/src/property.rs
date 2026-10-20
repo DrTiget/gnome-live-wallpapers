@@ -124,6 +124,8 @@ impl Property {
             }
             "textinput" => PropertyKind::TextInput { value: as_string(&value).unwrap_or_default() },
             "text" => PropertyKind::Text,
+            // Workshop authors use type-less entries with only `text` as HTML labels.
+            "" if def.get("value").is_none() => PropertyKind::Text,
             "group" => PropertyKind::Group,
             "file" => PropertyKind::File { value: as_string(&value).filter(|s| !s.is_empty()) },
             "directory" => PropertyKind::Directory {

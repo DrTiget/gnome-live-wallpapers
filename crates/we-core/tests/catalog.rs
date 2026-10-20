@@ -9,7 +9,7 @@ fn fixtures() -> PathBuf {
 #[test]
 fn scan_fixtures() {
     let cat = Catalog::scan(&[fixtures()]);
-    assert_eq!(cat.projects.len(), 8);
+    assert_eq!(cat.projects.len(), 9);
     assert_eq!(cat.errors.len(), 1);
     assert!(cat.errors[0].dir.ends_with("broken"));
     assert_eq!(cat.by_type(&ProjectType::Scene).count(), 2);
@@ -17,7 +17,7 @@ fn scan_fixtures() {
     assert_eq!(cat.type_counts()[&ProjectType::Video], 2);
     assert_eq!(cat.search("audio").count(), 2); // title and tag
     assert_eq!(cat.search("RAINY").count(), 1); // description
-    assert_eq!(cat.search("").count(), 8);
+    assert_eq!(cat.search("").count(), 9);
 }
 
 #[test]

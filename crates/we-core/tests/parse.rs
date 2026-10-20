@@ -139,3 +139,15 @@ fn type_parse_case_insensitive() {
     assert_eq!(ProjectType::parse(" Web "), ProjectType::Web);
     assert_eq!(ProjectType::parse("x"), ProjectType::Unknown("x".into()));
 }
+
+#[test]
+fn exe_without_type_and_typeless_label() {
+    // Mirrors the official "sheep" project and a workshop label property.
+    let p = Project::load(fx("unity_exe")).unwrap();
+    assert_eq!(p.kind, ProjectType::Application);
+    assert!(!p.kind.is_supported());
+    let label = p.properties.get("imgbst").unwrap();
+    assert!(matches!(label.kind, PropertyKind::Text));
+    assert_eq!(label.condition, None); // empty condition ignored
+    assert!(!label.has_value());
+}

@@ -25,7 +25,7 @@
 
 | crate / каталог | роль |
 |---|---|
-| `crates/we-core` | парсинг `project.json` (все типы: video, web, scene, preset, application), свойства `general.properties`, локализация, валидация, сканер Steam-библиотек (`libraryfolders.vdf`, native/Flatpak/Snap Steam), пресеты. Без зависимостей от GTK, полностью покрыт тестами. |
+| `crates/we-core` | парсинг `project.json` (все типы: video, web, scene, preset, application; без `type` — по расширению `file`, в т.ч. `.exe` → application), свойства `general.properties`, локализация, валидация, сканер Steam-библиотек (`libraryfolders.vdf`, native/Flatpak/Snap Steam), пресеты. Без зависимостей от GTK, полностью покрыт тестами. |
 | `crates/daemon` (`wpe-daemon`) | D-Bus сервис + рендерер. Без фичи `gtk` — headless (логирует команды рендеру; удобно для отладки GUI/расширения). С `--features gtk` — настоящий рендерер. |
 | `crates/gallery` (`wpe-gallery`) | этап 1: CLI поверх D-Bus; этап 3: libadwaita-галерея. |
 | `gnome-extension/wpe@wpe.github.io` | расширение Shell 50. |
@@ -35,7 +35,7 @@
 * `core.rs` — логика без GTK: `Catalog` + `State` (`$XDG_CONFIG_HOME/wpe/state.json`: назначения монитор→обои, `"*"` — все мониторы; оверрайды свойств; громкость). Пресеты разрешаются в базовые обои + значения пресета + пользовательские оверрайды. Наружу отдаёт команды `RenderCmd` трейту `Renderer`.
 * `gtk_renderer.rs` — GTK-поток. Команды из потоков zbus передаются через `glib::MainContext::invoke`. На каждый монитор — окно без рамки размером с монитор и заголовком `@wpe!<connector>` (например `@wpe!DP-1`) — по этому маркеру расширение его находит (не fullscreen: иначе Shell считал бы монитор занятым полноэкранным окном и прятал верхнюю панель). Горячее подключение мониторов — `gdk::Display::monitors()::items-changed`.
   * **Video**: `gtk::MediaFile` (бэкенд GStreamer в GTK4) → `gtk::Picture` с `ContentFit::Cover`, loop, без звука по умолчанию (`State.muted = true`, `SetVolume`). NVIDIA 580: аппаратное декодирование через `nvcodec` (gst-plugins-bad), при проблемах — запасной вариант `playbin3` + `gtk4paintablesink` (gstreamer1.0-gtk4).
-  * **Web**: `webkit6::WebView`, `file://` к `index.html`, разрешён доступ file→file. В начало документа инжектится `shim.js`, эмулирующий API WE:
+  * **Web**: `webkit6::WebView`, страница грузится через собственную схему `wpe://<хеш каталога>/<file>` (`webpath.rs`: защита от выхода за каталог, MIME, HTTP Range для `<video>`), схема зарегистрирована как secure + CORS. Не `file://`: SPA-фреймворки (официальные обои CORSAIR Collection на Angular) вызывают `history.replaceState()` с URL каталога, что WebKit запрещает для `file:` — белый экран. Вызовы шима из демона безопасны до загрузки страницы; свойства и состояние паузы досылаются после каждой (пере)загрузки. `WPE_DEBUG=1` выводит консоль JS в лог демона. В начало документа инжектится `shim.js`, эмулирующий API WE:
     `wallpaperPropertyListener.applyUserProperties({key:{type,value}})` (в т.ч. если листенер назначен после первой отправки),
     `applyGeneralProperties`, `setPaused`, `wallpaperRegisterAudioListener(cb)` (массив 128 float: 64 L + 64 R),
     `wallpaperRegisterPausedListener`, синтетические `mousemove/pointer*/mousedown/mouseup/click` по координатам от расширения.

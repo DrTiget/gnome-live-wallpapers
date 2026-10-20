@@ -10,7 +10,7 @@
 
 | часть | статус |
 |---|---|
-| `we-core` | готово, тесты зелёные |
+| `we-core` | готово, тесты зелёные; проверено на реальных данных: 19 стандартных проектов WE и 7 обоев из Workshop (`wpe-gallery scan -v <каталог>` — тип, свойства, проблемы) |
 | `wpe-daemon --features gtk` | этап 1 готов: видео (loop, без звука, cover) и web (WebKitGTK 6 + шим API WE: свойства, курсор/клики, пауза, аудио-API), окно на монитор, hotplug |
 | `wpe-daemon` без `gtk` | headless: D-Bus, каталог, state — для разработки GUI/расширения |
 | `wpe-gallery` | CLI (`list/scan/add-dir/set/props/prop/volume`); GUI — этап 3 |

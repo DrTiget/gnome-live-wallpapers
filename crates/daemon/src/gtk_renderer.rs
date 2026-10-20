@@ -16,6 +16,10 @@ use we_core::{Project, ProjectType};
 use webkit6::prelude::*;
 
 const SHIM: &str = include_str!("shim.js");
+use crate::webpath;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use webkit6::soup;
 
 enum Content {
     Video(gtk4::MediaFile),
@@ -34,6 +38,13 @@ thread_local! {
     static SURFACES: RefCell<HashMap<String, Surface>> = RefCell::new(HashMap::new());
     static APP: RefCell<Option<gtk4::Application>> = const { RefCell::new(None) };
     static VOLUME: RefCell<(f64, bool)> = const { RefCell::new((0.5, true)) };
+    /// wpe:// host -> wallpaper root directory.
+    static ROOTS: RefCell<HashMap<String, PathBuf>> = RefCell::new(HashMap::new());
+    /// Latest applyUserProperties JSON per wallpaper id (re-sent after (re)loads).
+    static PROPS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// Monitors currently paused by the extension.
+    static PAUSED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    static SCHEME_REGISTERED: RefCell<bool> = const { RefCell::new(false) };
 }
 
 /// Windows are only created while the GNOME extension is active; without it
@@ -119,6 +130,10 @@ fn show(monitor: String, project: Project) {
             Content::Video(media)
         }
         ProjectType::Web => {
+            ensure_scheme();
+            let host = webpath::host_for_root(&project.root);
+            ROOTS.with(|r| r.borrow_mut().insert(host.clone(), project.root.clone()));
+            PROPS.with(|p| p.borrow_mut().insert(id.clone(), project.properties.to_user_properties().to_string()));
             let view = webkit6::WebView::new();
             view.set_is_muted(VOLUME.with(|v| v.borrow().1));
             if let Some(ucm) = view.user_content_manager() {
@@ -133,16 +148,24 @@ fn show(monitor: String, project: Project) {
             if let Some(settings) = webkit6::prelude::WebViewExt::settings(&view) {
                 settings.set_allow_file_access_from_file_urls(true);
                 settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Always);
+                if std::env::var_os("WPE_DEBUG").is_some() {
+                    settings.set_enable_write_console_messages_to_stdout(true);
+                    settings.set_enable_developer_extras(true);
+                }
             }
-            let props = project.properties.to_user_properties().to_string();
+            let (wallpaper, mon) = (id.clone(), monitor.clone());
             view.connect_load_changed(move |v, ev| {
                 if ev == webkit6::LoadEvent::Finished {
-                    let js = format!("window.__wpe.applyUserProperties({props});");
-                    v.evaluate_javascript(&js, None, None, None::<&gio::Cancellable>, |_| {});
+                    if let Some(props) = PROPS.with(|p| p.borrow().get(&wallpaper).cloned()) {
+                        web_js(v, &format!("window.__wpe.applyUserProperties({props});"));
+                    }
+                    if PAUSED.with(|p| p.borrow().contains(&mon)) {
+                        web_js(v, "window.__wpe.setPaused(true);");
+                    }
                 }
             });
-            let uri = gio::File::for_path(project.entry_path().expect("validated")).uri();
-            view.load_uri(&uri);
+            let rel = project.file.as_deref().unwrap_or("index.html");
+            view.load_uri(&format!("{}://{host}/{}", webpath::SCHEME, webpath::encode_path(rel)));
             window.set_child(Some(&view));
             Content::Web(view)
         }
@@ -178,8 +201,77 @@ fn monitor_geometry(connector: &str) -> Option<String> {
     Some(format!("{}x{}x{}x{}", g.x(), g.y(), g.width(), g.height()))
 }
 
+/// Call into the shim; a no-op while the page (and thus the shim) is not loaded yet.
 fn web_js(view: &webkit6::WebView, js: &str) {
-    view.evaluate_javascript(js, None, None, None::<&gio::Cancellable>, |_| {});
+    let js = format!("if (window.__wpe) {{ {js} }}");
+    view.evaluate_javascript(&js, None, None, None::<&gio::Cancellable>, |_| {});
+}
+
+fn ensure_scheme() {
+    if SCHEME_REGISTERED.with(|r| r.replace(true)) {
+        return;
+    }
+    let Some(ctx) = webkit6::WebContext::default() else { return };
+    ctx.register_uri_scheme(webpath::SCHEME, serve_scheme);
+    if let Some(sm) = ctx.security_manager() {
+        sm.register_uri_scheme_as_secure(webpath::SCHEME);
+        sm.register_uri_scheme_as_cors_enabled(webpath::SCHEME);
+    }
+}
+
+/// Serve `wpe://<host>/<path>` from the wallpaper directory, with byte ranges
+/// (needed by media elements for seeking/looping).
+fn serve_scheme(req: &webkit6::URISchemeRequest) {
+    use gio::prelude::*;
+    let uri = req.uri().map(|u| u.to_string()).unwrap_or_default();
+    let rest = uri.strip_prefix(&format!("{}://", webpath::SCHEME)).unwrap_or("");
+    let (host, path) = match rest.split_once('/') {
+        Some((h, p)) => (h, format!("/{p}")),
+        None => (rest, "/".to_string()),
+    };
+    let file = ROOTS.with(|r| r.borrow().get(host).cloned()).and_then(|root| webpath::resolve(&root, &path));
+    let Some(file) = file else {
+        req.finish_error(&mut glib::Error::new(gio::IOErrorEnum::NotFound, &format!("not found: {uri}")));
+        return;
+    };
+    let len = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+    let stream = match gio::File::for_path(&file).read(None::<&gio::Cancellable>) {
+        Ok(s) => s,
+        Err(mut e) => return req.finish_error(&mut e),
+    };
+    let headers = soup::MessageHeaders::new(soup::MessageHeadersType::Response);
+    headers.append("Accept-Ranges", "bytes");
+    headers.append("Access-Control-Allow-Origin", "*");
+    let range = req
+        .http_headers()
+        .and_then(|h| h.one("Range"))
+        .and_then(|r| webpath::parse_range(&r, len));
+    let (status, body_len, input): (u32, u64, gio::InputStream) = match range {
+        Some((start, end)) => {
+            if let Err(mut e) = stream.seek(start as i64, glib::SeekType::Set, None::<&gio::Cancellable>) {
+                return req.finish_error(&mut e);
+            }
+            headers.append("Content-Range", &format!("bytes {start}-{end}/{len}"));
+            let n = end - start + 1;
+            let input: gio::InputStream = if end + 1 == len {
+                stream.upcast()
+            } else {
+                let mut buf = vec![0u8; n as usize];
+                match stream.read_all(&mut buf, None::<&gio::Cancellable>) {
+                    Ok((read, _)) => buf.truncate(read),
+                    Err(mut e) => return req.finish_error(&mut e),
+                }
+                gio::MemoryInputStream::from_bytes(&glib::Bytes::from_owned(buf)).upcast()
+            };
+            (206, n, input)
+        }
+        None => (200, len, stream.upcast()),
+    };
+    let resp = webkit6::URISchemeResponse::new(&input, body_len as i64);
+    resp.set_status(status, None);
+    resp.set_content_type(webpath::mime_for(&file));
+    resp.set_http_headers(headers);
+    req.finish_with_response(&resp);
 }
 
 fn handle_main(cmd: RenderCmd) {
@@ -190,6 +282,7 @@ fn handle_main(cmd: RenderCmd) {
         RenderCmd::Show { monitor, project } => show(monitor, *project),
         RenderCmd::Clear { monitor } => close(&monitor),
         RenderCmd::Properties { wallpaper, user_properties } => SURFACES.with(|s| {
+            PROPS.with(|p| p.borrow_mut().insert(wallpaper.clone(), user_properties.to_string()));
             for surf in s.borrow().values().filter(|s| s.wallpaper == wallpaper) {
                 if let Content::Web(v) = &surf.content {
                     web_js(v, &format!("window.__wpe.applyUserProperties({user_properties});"));
@@ -207,6 +300,14 @@ fn handle_main(cmd: RenderCmd) {
             }
         }),
         RenderCmd::Pause { monitor, paused } => SURFACES.with(|s| {
+            PAUSED.with(|p| {
+                let mut p = p.borrow_mut();
+                if paused {
+                    p.insert(monitor.clone());
+                } else {
+                    p.remove(&monitor);
+                }
+            });
             if let Some(surf) = s.borrow().get(&monitor) {
                 match &surf.content {
                     Content::Video(m) => m.set_playing(!paused),

@@ -127,6 +127,8 @@ impl Project {
             Some(ext) if ["mp4", "webm", "mkv", "avi", "mov", "m4v", "gif"].contains(&ext.as_str()) => ProjectType::Video,
             Some(ext) if ext == "html" || ext == "htm" => ProjectType::Web,
             Some(ext) if ext == "json" || ext == "pkg" => ProjectType::Scene,
+            // Official Unity/native wallpapers such as "sheep.exe".
+            Some(ext) if ext == "exe" => ProjectType::Application,
             _ => ProjectType::Unknown(String::new()),
         });
 
