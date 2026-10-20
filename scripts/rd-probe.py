@@ -3,7 +3,7 @@
 ScreenCast D-Bus APIs: take screenshots and inject pointer input.
 
 usage: rd-probe.py OUT_PREFIX [action ...]
-actions: shot:NAME  move:X,Y  click:X,Y  sleep:SEC  esc  fps:SEC (screencast frames/s =
+actions: shot:NAME  move:X,Y  click:X,Y  rclick:X,Y  sleep:SEC  esc  fps:SEC (screencast frames/s =
          how often the monitor actually repaints)
 Talks to the session bus in $DBUS_SESSION_BUS_ADDRESS (the nested one).
 """
@@ -15,6 +15,7 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gio, GLib, Gst
 
 BTN_LEFT = 0x110
+BTN_RIGHT = 0x111
 bus = Gio.bus_get_sync(Gio.BusType.SESSION)
 
 
@@ -58,7 +59,7 @@ def main():
         sys.exit("no pipewire stream")
 
     pipe = Gst.parse_launch(f"pipewiresrc path={node['id']} always-copy=true ! videoconvert ! "
-                            "videoscale ! video/x-raw,width=960 ! appsink name=sink max-buffers=1 drop=true sync=false")
+                            f"videoscale ! video/x-raw,{os.environ.get('WPE_PROBE_SIZE', 'width=960')} ! appsink name=sink max-buffers=1 drop=true sync=false")
     sink = pipe.get_by_name("sink")
     pipe.set_state(Gst.State.PLAYING)
 
@@ -108,15 +109,16 @@ def main():
             print(f"fps {n / sec:.1f}", flush=True)
         elif kind == "sleep":
             time.sleep(float(arg))
-        elif kind in ("move", "click"):
+        elif kind in ("move", "click", "rclick"):
             x, y = map(float, arg.split(","))
             rd("NotifyPointerMotionAbsolute", "(sdd)", (stream, x, y))
-            if kind == "click":
+            if kind != "move":
                 # the first absolute motion of a session is applied late
                 time.sleep(0.3)
-                rd("NotifyPointerButton", "(ib)", (BTN_LEFT, True))
+                btn = BTN_LEFT if kind == "click" else BTN_RIGHT
+                rd("NotifyPointerButton", "(ib)", (btn, True))
                 time.sleep(0.05)
-                rd("NotifyPointerButton", "(ib)", (BTN_LEFT, False))
+                rd("NotifyPointerButton", "(ib)", (btn, False))
             print(kind, x, y, flush=True)
     pipe.set_state(Gst.State.NULL)
     call("org.gnome.Mutter.RemoteDesktop", rd_path, "org.gnome.Mutter.RemoteDesktop.Session", "Stop")
