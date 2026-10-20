@@ -41,11 +41,20 @@ pub trait Renderer: Send {
 }
 
 /// Backend for builds without GTK: just logs commands (useful for GUI/extension dev).
+#[cfg_attr(feature = "gtk", allow(dead_code))]
 pub struct LogRenderer;
 impl Renderer for LogRenderer {
     fn handle(&mut self, cmd: RenderCmd) {
         eprintln!("[render] {cmd:?}");
     }
+}
+
+/// `$XDG_DATA_HOME/wpe/wallpapers` — wallpapers not from Steam.
+fn local_wallpaper_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
+    Some(base.join("wpe/wallpapers"))
 }
 
 pub struct Core {
@@ -68,11 +77,24 @@ impl Core {
         let mut roots = std::env::var_os("HOME")
             .map(|h| we_core::workshop_dirs(&PathBuf::from(h)))
             .unwrap_or_default();
+        roots.extend(local_wallpaper_dir());
         roots.extend(self.state.extra_dirs.iter().cloned());
         self.catalog = Catalog::scan(&roots);
         for e in &self.catalog.errors {
             eprintln!("[catalog] {}: {}", e.dir.display(), e.error);
         }
+    }
+
+    pub fn add_directory(&mut self, dir: PathBuf) -> Result<(), String> {
+        if !dir.is_dir() {
+            return Err(format!("{} is not a directory", dir.display()));
+        }
+        if !self.state.extra_dirs.contains(&dir) {
+            self.state.extra_dirs.push(dir);
+            self.persist();
+        }
+        self.rescan();
+        Ok(())
     }
 
     /// Project ready to render: preset resolved, user overrides applied.
@@ -110,6 +132,7 @@ impl Core {
 
     /// Re-send Show/Clear for every known monitor.
     pub fn apply_all(&mut self) {
+        self.renderer.handle(RenderCmd::Volume { volume: self.state.volume, muted: self.state.muted });
         for m in self.monitors.clone() {
             self.apply_monitor(&m);
         }

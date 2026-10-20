@@ -30,6 +30,13 @@ impl Service {
         Ok(())
     }
 
+    /// Add a directory with wallpapers (or a single wallpaper) and rescan.
+    async fn add_directory(&self, path: &str, #[zbus(signal_emitter)] em: SignalEmitter<'_>) -> fdo::Result<()> {
+        self.core.lock().unwrap().add_directory(path.into()).map_err(err)?;
+        Self::catalog_changed(&em).await?;
+        Ok(())
+    }
+
     /// Monitor connector name ("DP-1") or "*" for all; empty id clears.
     async fn set_wallpaper(&self, monitor: &str, id: &str, #[zbus(signal_emitter)] em: SignalEmitter<'_>) -> fdo::Result<()> {
         self.core.lock().unwrap().set_wallpaper(monitor, id).map_err(err)?;

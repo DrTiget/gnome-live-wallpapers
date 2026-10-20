@@ -11,10 +11,11 @@
 | часть | статус |
 |---|---|
 | `we-core` | готово, тесты зелёные |
-| `wpe-daemon` (headless: D-Bus, каталог, state) | собирается, тесты |
-| `wpe-daemon --features gtk` (рендерер Video/Web/Scene) | каркас, **не собирался** на dev-сервере (нет GTK dev-библиотек) — проверить на десктопе |
-| `wpe-gallery` | CLI (`list/scan/set/props/prop`); GUI — этап 3 |
-| `gnome-extension` | metadata + каркас `extension.js` |
+| `wpe-daemon --features gtk` | этап 1 готов: видео (loop, без звука, cover) и web (WebKitGTK 6 + шим API WE: свойства, курсор/клики, пауза, аудио-API), окно на монитор, hotplug |
+| `wpe-daemon` без `gtk` | headless: D-Bus, каталог, state — для разработки GUI/расширения |
+| `wpe-gallery` | CLI (`list/scan/add-dir/set/props/prop/volume`); GUI — этап 3 |
+| `gnome-extension` | готово: окно рендерера → фон под всеми окнами (и в обзоре), скрыто из обзора/alt-tab/дока, курсор/клики с пустого рабочего стола (и поверх DING), пауза при maximized/fullscreen и блокировке |
+| сцены, аудиоспектр | этапы 2–3 |
 
 ## Зависимости (Ubuntu 26.04)
 
@@ -33,23 +34,46 @@ sudo apt install cmake libglfw3-dev libglew-dev libglm-dev libsdl2-dev liblz4-de
 
 Rust — через rustup (без sudo): `curl https://sh.rustup.rs -sSf | sh`.
 
-## Сборка
+## Сборка и тесты
 
 ```sh
-cargo test --workspace                       # we-core + headless daemon
+cargo test --workspace                        # we-core + headless daemon
+node scripts/test-shim.mjs                    # JS-шим API Wallpaper Engine
 cargo build --release -p wpe-daemon --features gtk
 cargo build --release -p wpe-gallery
-
-./target/release/wpe-gallery scan ~/.local/share/Steam/steamapps/workshop/content/431960
-./target/release/wpe-daemon &                # D-Bus io.github.wpe.Daemon
-./target/release/wpe-gallery list
-./target/release/wpe-gallery set '*' <workshop-id>
-./target/release/wpe-gallery prop <id> schemecolor '"1 0 0"'
+scripts/nested-test.sh                        # интеграционный тест в отдельной headless GNOME Shell
+WPE_SHELL_MODE=ubuntu WPE_MONITORS="1280x720 1024x768" scripts/nested-test.sh
 ```
 
-Расширение:
+`nested-test.sh` не трогает текущую сессию (свой D-Bus, GSettings в keyfile, свои `XDG_*`),
+скриншоты и логи — в `/tmp/wpe-nested/`. Тестовые обои: `examples/` (видео генерируется
+`examples/make-test-video.sh`), путь задаётся `WPE_TEST_DIR` (по умолчанию `~/wpe-test`; можно указать `examples/` после `make-test-video.sh`).
+
+## Установка (без sudo)
 
 ```sh
-cp -r gnome-extension/wpe@wpe.github.io ~/.local/share/gnome-shell/extensions/
-gnome-extensions enable wpe@wpe.github.io   # после перелогина (Wayland)
+scripts/install.sh       # ~/.local/bin/wpe-{daemon,gallery}, systemd --user unit (enable),
+                         # расширение в ~/.local/share/gnome-shell/extensions + включение
+# выйти из сеанса и войти снова (Wayland подхватывает новые расширения только так)
+wpe-gallery add-dir ~/wpe-test        # или обои из Steam Workshop находятся сами
+wpe-gallery list
+wpe-gallery set '*' web-interactive   # '*' — все мониторы, или DP-1 / HDMI-1 …
+wpe-gallery prop web-interactive schemecolor '"1 0.3 0.1"'
+wpe-gallery volume 0.5 false          # включить звук (по умолчанию выключен)
+scripts/install.sh --uninstall
 ```
+
+Состояние: `~/.config/wpe/state.json`. Свои обои без Steam: `~/.local/share/wpe/wallpapers/<имя>/project.json`.
+
+Диагностика:
+
+```sh
+gnome-extensions info wpe@wpe.github.io     # State: ACTIVE
+systemctl --user status wpe-daemon
+journalctl --user -u wpe-daemon -f          # демон
+journalctl -f /usr/bin/gnome-shell | grep wpe   # расширение
+systemctl --user stop wpe-daemon            # убрать обои немедленно
+```
+
+Отладка: `WPE_DEBUG=1` (демон логирует команды рендеру), `WPE_NOHIDE=1` (обычные окна с рамкой,
+без расширения), `WPE_EXT_DEBUG=1` в окружении gnome-shell (лог ввода/геометрии расширения).

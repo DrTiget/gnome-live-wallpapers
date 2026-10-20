@@ -20,12 +20,17 @@ pub struct State {
     pub extra_dirs: Vec<PathBuf>,
     #[serde(default = "default_volume")]
     pub volume: f64,
-    #[serde(default)]
+    /// Wallpapers are silent until the user unmutes them.
+    #[serde(default = "default_muted")]
     pub muted: bool,
 }
 
 fn default_volume() -> f64 {
     0.5
+}
+
+fn default_muted() -> bool {
+    true
 }
 
 pub fn default_path() -> PathBuf {
@@ -41,7 +46,7 @@ impl State {
         std::fs::read(path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_else(|| State { volume: default_volume(), ..Default::default() })
+            .unwrap_or_else(|| State { volume: default_volume(), muted: default_muted(), ..Default::default() })
     }
 
     /// Atomic write (tmp + rename).
@@ -69,6 +74,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("x/state.json");
         assert_eq!(State::load(&path).volume, 0.5);
+        assert!(State::load(&path).muted);
         let mut s = State::load(&path);
         s.assignments.insert("*".into(), "1".into());
         s.assignments.insert("DP-1".into(), "2".into());

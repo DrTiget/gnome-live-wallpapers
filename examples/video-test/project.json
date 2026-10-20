@@ -1,0 +1,8 @@
+{
+	"file" : "video.mp4",
+	"general" : { "properties" : { "schemecolor" : { "order" : 0, "text" : "ui_browse_properties_scheme_color", "type" : "color", "value" : "0.5 0.5 0.5" } } },
+	"preview" : "preview.png",
+	"tags" : [ "Test" ],
+	"title" : "WPE Test: Video",
+	"type" : "video"
+}

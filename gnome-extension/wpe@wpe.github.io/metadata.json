@@ -1,8 +1,9 @@
 {
   "uuid": "wpe@wpe.github.io",
   "name": "WPE Live Wallpaper",
-  "description": "Places wpe-daemon renderer windows as the desktop background, forwards pointer input and pauses when covered.",
+  "description": "Shows wpe-daemon wallpapers (video, web) as the desktop background, forwards pointer input to them and pauses them when covered by maximized/fullscreen windows.",
   "shell-version": ["50"],
+  "session-modes": ["user", "unlock-dialog"],
   "url": "https://github.com/wpe/wpe",
   "version": 1
 }

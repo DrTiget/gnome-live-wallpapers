@@ -1,9 +1,9 @@
 //! GTK4 renderer backend (feature `gtk`). One undecorated window per monitor,
-//! titled `@wpe!<connector>` so the GNOME extension can find it and move it
-//! into the background layer (Hanabi approach).
-//!
-//! NOTE: written against gtk4 0.11 / webkit6 0.6 but not compiled on the dev
-//! server (no GTK dev libraries there) — verify on the desktop.
+//! sized to the monitor and titled `@wpe!<connector>`. The GNOME extension
+//! finds it by title, keeps it minimized and out of the window lists, and
+//! shows a Clutter clone of it inside the desktop background actor of that
+//! monitor (Hanabi approach). Set `WPE_NOHIDE=1` to get normal decorated
+//! windows for debugging without the extension.
 
 use crate::core::{PointerKind, RenderCmd, Renderer};
 use gtk4::prelude::*;
@@ -11,6 +11,7 @@ use gtk4::{glib, gio};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
 use we_core::{Project, ProjectType};
 use webkit6::prelude::*;
 
@@ -32,14 +33,30 @@ struct Surface {
 thread_local! {
     static SURFACES: RefCell<HashMap<String, Surface>> = RefCell::new(HashMap::new());
     static APP: RefCell<Option<gtk4::Application>> = const { RefCell::new(None) };
+    static VOLUME: RefCell<(f64, bool)> = const { RefCell::new((0.5, true)) };
 }
+
+/// Windows are only created while the GNOME extension is active; without it
+/// they would show up as ordinary windows on top of the desktop.
+pub static SHELL_READY: AtomicBool = AtomicBool::new(false);
 
 pub struct GtkRenderer;
 
 impl Renderer for GtkRenderer {
     fn handle(&mut self, cmd: RenderCmd) {
+        if matches!(cmd, RenderCmd::Show { .. }) && !SHELL_READY.load(Ordering::SeqCst) {
+            return; // re-applied by the extension watcher once it is active
+        }
         // D-Bus handlers run on zbus threads; GTK must be touched on the main thread.
         glib::MainContext::default().invoke(move || handle_main(cmd));
+    }
+}
+
+/// Close every renderer window (extension went away).
+pub fn close_all() {
+    let monitors: Vec<String> = SURFACES.with(|s| s.borrow().keys().cloned().collect());
+    for m in monitors {
+        close(&m);
     }
 }
 
@@ -58,14 +75,29 @@ fn close(monitor: &str) {
     });
 }
 
+fn gdk_monitor(connector: &str) -> Option<gtk4::gdk::Monitor> {
+    let display = gtk4::gdk::Display::default()?;
+    display
+        .monitors()
+        .iter::<gtk4::gdk::Monitor>()
+        .flatten()
+        .find(|m| m.connector().is_some_and(|c| c.as_str() == connector))
+}
+
 fn make_window(monitor: &str) -> gtk4::ApplicationWindow {
     let app = APP.with(|a| a.borrow().clone()).expect("application set");
-    let w = gtk4::ApplicationWindow::builder()
+    let (w, h) = gdk_monitor(monitor)
+        .map(|m| (m.geometry().width(), m.geometry().height()))
+        .unwrap_or((1920, 1080));
+    let nohide = std::env::var_os("WPE_NOHIDE").is_some();
+    let title = if nohide { format!("WPE renderer {monitor}") } else { format!("@wpe!{monitor}") };
+    gtk4::ApplicationWindow::builder()
         .application(&app)
-        .title(format!("@wpe!{monitor}"))
-        .decorated(false)
-        .build();
-    w
+        .title(title)
+        .decorated(nohide)
+        .default_width(w)
+        .default_height(h)
+        .build()
 }
 
 fn show(monitor: String, project: Project) {
@@ -77,7 +109,9 @@ fn show(monitor: String, project: Project) {
             let path = project.entry_path().expect("validated");
             let media = gtk4::MediaFile::for_file(&gio::File::for_path(path));
             media.set_loop(true);
-            media.set_muted(true);
+            let (volume, muted) = VOLUME.with(|v| *v.borrow());
+            media.set_volume(volume);
+            media.set_muted(muted);
             let pic = gtk4::Picture::for_paintable(&media);
             pic.set_content_fit(gtk4::ContentFit::Cover);
             window.set_child(Some(&pic));
@@ -86,6 +120,7 @@ fn show(monitor: String, project: Project) {
         }
         ProjectType::Web => {
             let view = webkit6::WebView::new();
+            view.set_is_muted(VOLUME.with(|v| v.borrow().1));
             if let Some(ucm) = view.user_content_manager() {
                 ucm.add_script(&webkit6::UserScript::new(
                     SHIM,
@@ -133,20 +168,14 @@ fn show(monitor: String, project: Project) {
         _ => return,
     };
     if !matches!(content, Content::Scene(_)) {
-        window.fullscreen();
         window.present();
     }
     SURFACES.with(|s| s.borrow_mut().insert(monitor, Surface { window, wallpaper: id, content }));
 }
 
 fn monitor_geometry(connector: &str) -> Option<String> {
-    let display = gtk4::gdk::Display::default()?;
-    display.monitors().iter::<gtk4::gdk::Monitor>().flatten().find_map(|m| {
-        (m.connector()?.as_str() == connector).then(|| {
-            let g = m.geometry();
-            format!("{}x{}x{}x{}", g.x(), g.y(), g.width(), g.height())
-        })
-    })
+    let g = gdk_monitor(connector)?.geometry();
+    Some(format!("{}x{}x{}x{}", g.x(), g.y(), g.width(), g.height()))
 }
 
 fn web_js(view: &webkit6::WebView, js: &str) {
@@ -154,6 +183,9 @@ fn web_js(view: &webkit6::WebView, js: &str) {
 }
 
 fn handle_main(cmd: RenderCmd) {
+    if std::env::var_os("WPE_DEBUG").is_some() {
+        eprintln!("[render] {cmd:?}");
+    }
     match cmd {
         RenderCmd::Show { monitor, project } => show(monitor, *project),
         RenderCmd::Clear { monitor } => close(&monitor),
@@ -186,13 +218,20 @@ fn handle_main(cmd: RenderCmd) {
                 }
             }
         }),
-        RenderCmd::Volume { volume, muted } => SURFACES.with(|s| {
-            for surf in s.borrow().values() {
-                if let Content::Video(m) = &surf.content {
-                    m.set_volume(volume);
-                    m.set_muted(muted);
+        RenderCmd::Volume { volume, muted } => {
+            VOLUME.with(|v| *v.borrow_mut() = (volume, muted));
+            SURFACES.with(|s| {
+                for surf in s.borrow().values() {
+                    match &surf.content {
+                        Content::Video(m) => {
+                            m.set_volume(volume);
+                            m.set_muted(muted);
+                        }
+                        Content::Web(v) => v.set_is_muted(muted),
+                        Content::Scene(_) => {}
+                    }
                 }
-            }
-        }),
+            })
+        }
     }
 }

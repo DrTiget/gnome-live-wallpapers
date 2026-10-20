@@ -33,8 +33,8 @@
 ### Демон
 
 * `core.rs` — логика без GTK: `Catalog` + `State` (`$XDG_CONFIG_HOME/wpe/state.json`: назначения монитор→обои, `"*"` — все мониторы; оверрайды свойств; громкость). Пресеты разрешаются в базовые обои + значения пресета + пользовательские оверрайды. Наружу отдаёт команды `RenderCmd` трейту `Renderer`.
-* `gtk_renderer.rs` — GTK-поток. Команды из потоков zbus передаются через `glib::MainContext::invoke`. На каждый монитор — undecorated fullscreen-окно с заголовком `@wpe!<connector>` (например `@wpe!DP-1`) — по этому маркеру расширение его находит.
-  * **Video**: `gtk::MediaFile` (бэкенд GStreamer в GTK4) → `gtk::Picture` с `ContentFit::Cover`, loop, mute по умолчанию. NVIDIA 580: аппаратное декодирование через `nvcodec` (gst-plugins-bad), при проблемах — запасной вариант `playbin3` + `gtk4paintablesink` (gstreamer1.0-gtk4).
+* `gtk_renderer.rs` — GTK-поток. Команды из потоков zbus передаются через `glib::MainContext::invoke`. На каждый монитор — окно без рамки размером с монитор и заголовком `@wpe!<connector>` (например `@wpe!DP-1`) — по этому маркеру расширение его находит (не fullscreen: иначе Shell считал бы монитор занятым полноэкранным окном и прятал верхнюю панель). Горячее подключение мониторов — `gdk::Display::monitors()::items-changed`.
+  * **Video**: `gtk::MediaFile` (бэкенд GStreamer в GTK4) → `gtk::Picture` с `ContentFit::Cover`, loop, без звука по умолчанию (`State.muted = true`, `SetVolume`). NVIDIA 580: аппаратное декодирование через `nvcodec` (gst-plugins-bad), при проблемах — запасной вариант `playbin3` + `gtk4paintablesink` (gstreamer1.0-gtk4).
   * **Web**: `webkit6::WebView`, `file://` к `index.html`, разрешён доступ file→file. В начало документа инжектится `shim.js`, эмулирующий API WE:
     `wallpaperPropertyListener.applyUserProperties({key:{type,value}})` (в т.ч. если листенер назначен после первой отправки),
     `applyGeneralProperties`, `setPaused`, `wallpaperRegisterAudioListener(cb)` (массив 128 float: 64 L + 64 R),
@@ -49,7 +49,7 @@
 | Метод | Сигнатура | Кто вызывает |
 |---|---|---|
 | `ListWallpapers() → s` | JSON `[{id,title,type,supported,preview,root,tags,audio,rating}]` | галерея |
-| `Rescan()` | пересканировать Workshop + `extra_dirs` | галерея |
+| `Rescan()` | пересканировать Workshop + `~/.local/share/wpe/wallpapers` + `extra_dirs` | галерея |
 | `SetWallpaper(s monitor, s id)` | `monitor` = connector или `"*"`; пустой `id` снимает | галерея |
 | `GetAssignments() → a{ss}` | | галерея |
 | `GetProperties(s id) → s` | JSON `we_core::Properties` с применёнными оверрайдами | галерея |
@@ -59,6 +59,7 @@
 | `SetPaused(s monitor, b paused)` | | расширение |
 | `SetMonitors(as connectors)` | раскладка мониторов изменилась | расширение |
 | `SetVolume(d volume, b muted)` | | галерея |
+| `AddDirectory(s path)` | добавить каталог с обоями (сохраняется в `extra_dirs`), пересканировать | галерея |
 | *(этап 2)* `GetRendererPids() → a{su}` | PID процессов сцен, чтобы расширение нашло их окна | расширение |
 
 Свойство `Version (s)`. Сигналы: `CatalogChanged()`, `AssignmentsChanged()`, `PropertiesChanged(s id)`.
@@ -67,14 +68,26 @@
 
 ### Расширение GNOME Shell 50
 
-Подход Hanabi (jeffshee/gnome-ext-hanabi):
-1. `global.display` `window-created` → окна с заголовком `@wpe!<conn>` (и окна с PID сцен).
-2. `WindowActor` переносится в `Main.layoutManager._backgroundGroup` поверх стандартного фона нужного монитора; окно скрывается из alt-tab/обзора/дока (override `Workspace`/`AltTab` фильтров, как в Hanabi), делается sticky.
-3. В обзоре (Activities) — клон актёра в фоне рабочих столов.
-4. Ввод: окна в background group не получают событий, поэтому расширение слушает `captured-event` на stage; если под курсором фон (нет окна, не панель) — `PointerEvent` (motion с троттлингом ~60 Гц).
-5. Пауза: для каждого монитора, если на активном рабочем столе есть fullscreen или maximized окно (`window.is_fullscreen()`, `get_maximized()`), не минимизированное, — `SetPaused(conn, true)`. Также пауза при блокировке экрана.
+`gnome-extension/wpe@wpe.github.io/extension.js` — подход Hanabi (jeffshee/gnome-ext-hanabi), адаптированный и проверенный на Shell 50.1 (headless-сессия, см. «Тестирование»):
 
-Wayland-ограничение: клиент не может сам стать фоном (в Mutter нет wlr-layer-shell), поэтому без расширения обои работают просто как обычные окна.
+1. **Поиск окон.** `window_manager::map`, `display::window-created` (+ `notify::title`): окна с заголовком `@wpe!<connector>`. Индекс монитора — `global.backend.get_monitor_manager().get_monitor_for_connector()`.
+2. **Окно в фон.** В `BackgroundManager._createBackgroundActor` (InjectionManager) в каждый фон монитора добавляется `St.Widget` с `Clutter.Clone` актёра окна рендерера. Фон есть и на рабочем столе, и в миниатюрах/рабочих столах обзора, поэтому обои видны везде. Экран блокировки не трогаем.
+3. **Как прячем настоящее окно.** *Не сворачиваем* (в отличие от Hanabi): Mutter 50 даёт свёрнутому окну xdg-toplevel `suspended`, GTK/WebKit перестают рисовать, клон замирает (проверено). Вместо этого окно остаётся отображённым: `stick()`, `lower()`, не `above`, а его `MetaWindowActor` скрыт (`hide()` + повторное скрытие на `notify::visible`). Клон рисует скрытый источник, Mutter продолжает слать frame callbacks — 60 FPS.
+4. **Геометрия.** Mutter автоматически подгоняет окно размером с монитор под рабочую область (док/панель: 1533×868 вместо 1600×900). Расширение делает `unmaximize()` + `move_resize_frame(user_op=true, геометрия монитора)` на `position-changed`/`size-changed`/`monitors-changed`, иначе клон растягивается и координаты курсора съезжают.
+5. **Скрытие из списков** (как Hanabi): `Shell.Global.get_window_actors`, `Workspace/WorkspaceThumbnail._isOverviewWindow`, `Meta.Display.get_tab_list` (alt-tab), `Shell.WindowTracker.get_window_app`, `Shell.App.get_windows/get_n_windows`, `Shell.AppSystem.get_running` (док). Уведомление «… готово» (`WindowAttentionHandler`, подключён bound-методом) переподключается через фильтр. Если фокус попал в окно рендерера — он передаётся верхнему обычному окну.
+6. **Ввод.** `global.stage::captured-event` (motion/press/release). Событие считается «на рабочем столе», если под курсором `global.stage`, актёр из `Main.layoutManager._backgroundGroup` (фон реактивен из-за контекстного меню) или прозрачное окно Desktop Icons NG (Ubuntu, `com.rastersoft.ding` / заголовок `@!…`/`Desktop Icons N`). Не в обзоре, без модальных диалогов, не на экране блокировки. Release доставляется, если press был на рабочем столе. Motion ограничен ~60 Гц с доставкой последней позиции. → `PointerEvent(connector, x, y локальные, kind, button)` → демон → `window.__wpe.pointer()` → DOM `mousemove/pointer*/mousedown/mouseup/click`.
+7. **Пауза.** Монитор на паузе, если на активном рабочем столе есть видимое (`showing_on_its_workspace`) окно `fullscreen || is_maximized()` на этом мониторе (без рендереров, DING, skip-taskbar), или экран заблокирован (`session-modes: user, unlock-dialog` — расширение не выгружается при блокировке). Пересчёт по сигналам окон/рабочих столов, отправляются только изменения `SetPaused`; при (пере)запуске демона состояние шлётся заново (`bus_watch_name`).
+   В демоне: видео — `MediaFile.set_playing(false)`; web — шим откладывает колбэки `requestAnimationFrame`, ставит на паузу `<video>/<audio>` и вызывает `setPaused`/`wallpaperRegisterPausedListener`.
+
+Защита в демоне: окна создаются, только пока расширение `ACTIVE` (`org.gnome.Shell.Extensions.GetExtensionInfo`, опрос раз в 2 с); если расширение выключено — окна закрываются. Иначе без расширения на экране оказалось бы обычное окно поверх рабочего стола. `WPE_NOHIDE=1` — отладочный режим: обычные окна с рамкой, без проверки.
+
+Wayland-ограничение: клиент не может сам стать фоном (в Mutter нет wlr-layer-shell), поэтому без расширения обои не показываются.
+
+### Тестирование без перелогина
+
+`scripts/nested-test.sh` запускает **отдельную headless GNOME Shell** (`gnome-shell --headless --virtual-monitor …`) в собственном `dbus-run-session`, с GSettings в keyfile и своими `XDG_*` каталогами — реальная сессия и её dconf не затрагиваются. Внутри: демон, CLI, `scripts/rd-probe.py` (Mutter RemoteDesktop + ScreenCast: скриншоты и синтетические движения/клики), `scripts/maximized-window.py` (проверка паузы). Переменные: `WPE_SHELL_MODE=ubuntu` (с ubuntu-dock и DING как в реальной сессии), `WPE_MONITORS="1280x720 1024x768"` (несколько мониторов), `WPE_DEBUG=1` (лог команд рендеру), `WPE_EXT_DEBUG=1` (лог расширения). Результаты — в `/tmp/wpe-nested/*.png`, `shell.log`, `daemon.log`.
+
+`node scripts/test-shim.mjs` — юнит-тест JS-шима.
 
 ## Интеграция linux-wallpaperengine (сцены)
 
@@ -91,7 +104,7 @@ Wayland-ограничение: клиент не может сам стать �
 
 ## Этапы
 
-1. **MVP: Video + Web с интерактивом на фоне.** we-core (готово), D-Bus API (готово, headless), GTK-рендерер Video/Web + шим, расширение: фон + курсор/клики + пауза, CLI `wpe-gallery`, systemd user unit.
+1. **MVP: Video + Web с интерактивом на фоне** — готово и проверено в headless GNOME Shell 50.1 на NVIDIA 580 (1 и 2 монитора, режимы `user` и `ubuntu` с DING): we-core, D-Bus API, GTK-рендерер Video/Web + шим, расширение (фон, скрытие окон, курсор/клики, пауза), CLI `wpe-gallery`, systemd user unit, `scripts/install.sh`.
 2. **Сцены**: сборка linux-wallpaperengine (подмодуль + скрипт), 2a, затем 2b.
 3. **Аудио + галерея**: PipeWire → FFT → `wallpaperRegisterAudioListener`; libadwaita-галерея: сетка превью (GIF/JPG), фильтры по типу/тегам/поиск (`Catalog::search`), выбор монитора, редактор свойств, генерируемый по `PropertyKind` (color → `GtkColorDialogButton`, slider → `GtkScale`, combo → `AdwComboRow`, bool → `AdwSwitchRow`, text → `AdwEntryRow`, file/directory → `GtkFileDialog`), с учётом `condition` (простое вычисление `key.value == X`), локализация через `Project::localize`.
 4. Дальше: плейлисты, импорт `.pkg`/распаковка, автозапуск, энергосбережение (пауза на батарее), web-свойства `directory` (`wallpaperRequestRandomFileForProperty`).

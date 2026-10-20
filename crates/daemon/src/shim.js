@@ -6,6 +6,29 @@
   const pausedListeners = [];
   let pending = null; // properties received before the page registered its listener
 
+  // Real pause: defer requestAnimationFrame callbacks and pause media while
+  // the wallpaper is covered (WE stops rendering in that case as well).
+  let paused = false;
+  const nativeRAF = window.requestAnimationFrame.bind(window);
+  const nativeCAF = window.cancelAnimationFrame.bind(window);
+  const deferred = new Map();
+  let fakeId = 1 << 30;
+  window.requestAnimationFrame = function (cb) {
+    if (!paused) return nativeRAF(cb);
+    const id = ++fakeId;
+    deferred.set(id, cb);
+    return id;
+  };
+  window.cancelAnimationFrame = function (id) {
+    if (!deferred.delete(id)) nativeCAF(id);
+  };
+  function setMediaPaused(p) {
+    for (const m of document.querySelectorAll("video, audio")) {
+      if (p && !m.paused) { m.dataset.wpePaused = "1"; m.pause(); }
+      else if (!p && m.dataset.wpePaused) { delete m.dataset.wpePaused; m.play().catch(() => {}); }
+    }
+  }
+
   window.wallpaperRegisterAudioListener = function (cb) { audioListeners.push(cb); };
   window.wallpaperRegisterPausedListener = function (cb) { pausedListeners.push(cb); };
   window.wallpaperRequestRandomFileForProperty = function (_key, cb) { /* stage 3 */ };
@@ -28,9 +51,17 @@
     applyGeneralProperties(props) {
       if (listener && listener.applyGeneralProperties) listener.applyGeneralProperties(props);
     },
-    setPaused(paused) {
-      if (listener && listener.setPaused) listener.setPaused(paused);
-      pausedListeners.forEach((cb) => cb({ paused }));
+    setPaused(p) {
+      if (p === paused) return;
+      paused = p;
+      setMediaPaused(p);
+      if (!p) {
+        const cbs = [...deferred.values()];
+        deferred.clear();
+        cbs.forEach((cb) => nativeRAF(cb));
+      }
+      if (listener && listener.setPaused) listener.setPaused(p);
+      pausedListeners.forEach((cb) => cb({ paused: p }));
     },
     // 128 floats: 64 left + 64 right channel, 0..~1.
     audio(samples) { for (const cb of audioListeners) cb(samples); },

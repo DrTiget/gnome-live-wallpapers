@@ -4,7 +4,7 @@
 
 use zbus::blocking::{Connection, Proxy};
 
-const USAGE: &str = "usage: wpe-gallery list | scan <dir> | set <monitor|*> <id> | props <id> | prop <id> <key> <json>";
+const USAGE: &str = "usage: wpe-gallery list | scan <dir> | add-dir <dir> | volume <0..1> <muted:true|false> | set <monitor|*> <id> | props <id> | prop <id> <key> <json>";
 
 fn proxy(conn: &Connection) -> zbus::Result<Proxy<'_>> {
     Proxy::new(conn, "io.github.wpe.Daemon", "/io/github/wpe/Daemon", "io.github.wpe.Daemon1")
@@ -31,6 +31,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for w in v.as_array().into_iter().flatten() {
                 println!("{:<12} {:<8} {}", w["id"].as_str().unwrap_or(""), w["type"].as_str().unwrap_or(""), w["title"].as_str().unwrap_or(""));
             }
+        }
+        ["add-dir", dir] => {
+            let conn = Connection::session()?;
+            let abs = std::fs::canonicalize(dir)?;
+            proxy(&conn)?.call::<_, _, ()>("AddDirectory", &(abs.to_string_lossy().as_ref(),))?;
+        }
+        ["volume", vol, muted] => {
+            let conn = Connection::session()?;
+            proxy(&conn)?.call::<_, _, ()>("SetVolume", &(vol.parse::<f64>()?, muted.parse::<bool>()?))?;
         }
         ["set", mon, id] => {
             let conn = Connection::session()?;
