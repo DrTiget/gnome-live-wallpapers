@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use webkit6::soup;
 
 enum Content {
-    Video(gtk4::MediaFile),
+    Video(crate::video::Video),
     Web(webkit6::WebView),
     /// linux-wallpaperengine subprocess with its own window.
     Scene(SceneProc),
@@ -122,6 +122,10 @@ pub fn set_application(app: &gtk4::Application) {
 fn close(monitor: &str) {
     SURFACES.with(|s| {
         if let Some(surf) = s.borrow_mut().remove(monitor) {
+            // A destroyed view keeps its web process (and the page's timers) alive.
+            if let Content::Web(v) = &surf.content {
+                v.terminate_web_process();
+            }
             if let Some(w) = surf.window {
                 w.destroy();
             }
@@ -174,16 +178,15 @@ fn show(monitor: String, project: Project) {
     let content = match project.kind {
         ProjectType::Video => {
             let path = project.entry_path().expect("validated");
-            let media = gtk4::MediaFile::for_file(&gio::File::for_path(path));
-            media.set_loop(true);
             let (volume, muted) = VOLUME.with(|v| *v.borrow());
-            media.set_volume(volume);
-            media.set_muted(muted);
-            let pic = gtk4::Picture::for_paintable(&media);
+            let (video, paintable) = crate::video::Video::new(&path, volume, muted);
+            if PAUSED.with(|p| p.borrow().contains(&monitor)) {
+                video.set_playing(false);
+            }
+            let pic = gtk4::Picture::for_paintable(&paintable);
             pic.set_content_fit(gtk4::ContentFit::Cover);
             window.set_child(Some(&pic));
-            media.play();
-            Content::Video(media)
+            Content::Video(video)
         }
         ProjectType::Web => {
             ensure_scheme();
@@ -193,8 +196,9 @@ fn show(monitor: String, project: Project) {
             let view = webkit6::WebView::new();
             view.set_is_muted(VOLUME.with(|v| v.borrow().1));
             if let Some(ucm) = view.user_content_manager() {
+                // The frame rate limit applies to requestAnimationFrame as well.
                 ucm.add_script(&webkit6::UserScript::new(
-                    SHIM,
+                    &format!("window.__wpeFps = {};\n{SHIM}", FPS.get()),
                     webkit6::UserContentInjectedFrames::TopFrame,
                     webkit6::UserScriptInjectionTime::Start,
                     &[],
@@ -544,6 +548,13 @@ fn handle_main(cmd: RenderCmd) {
             update_audio();
         }
         RenderCmd::Fps(fps) => {
+            SURFACES.with(|s| {
+                for surf in s.borrow().values() {
+                    if let Content::Web(v) = &surf.content {
+                        web_js(v, &format!("window.__wpe.setFps({fps});"));
+                    }
+                }
+            });
             if FPS.replace(fps) != fps {
                 restart_scenes(None);
             }
@@ -553,10 +564,7 @@ fn handle_main(cmd: RenderCmd) {
             SURFACES.with(|s| {
                 for surf in s.borrow().values() {
                     match &surf.content {
-                        Content::Video(m) => {
-                            m.set_volume(volume);
-                            m.set_muted(muted);
-                        }
+                        Content::Video(m) => m.set_volume(volume, muted),
                         Content::Web(v) => v.set_is_muted(muted),
                         Content::Scene(_) => {}
                     }

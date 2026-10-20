@@ -18,6 +18,7 @@
 | сцены | этап 2 готов: linux-wallpaperengine (наш патч `--control-stdin`) в окне, найденном по PID, фоном; курсор/параллакс, пауза, свойства, FPS (`wpe-gallery fps 30`), звук выключен по умолчанию |
 | аудиоспектр | этап 3 готов: web — захват монитора выхода по умолчанию (`pw-record`), FFT → 64+64 полосы, 30 Гц в `wallpaperRegisterAudioListener`, только пока видимые (не на паузе) обои зарегистрировали listener; сцены — захват самого linux-wallpaperengine (патч 0002: один поток, пауза = cork) |
 | статусы | `ListWallpapers`: сцены без `general.orthogonalprojection` в scene.json (3D с перспективной камерой; читается и из `scene.pkg`) — `unsupported`, их нельзя назначить; сцена, чей рендерер упал при запуске, — `broken` с причиной из его вывода (до успешного запуска, сигнал `CatalogChanged`) |
+| нагрузка и пауза | web: лимит FPS для `requestAnimationFrame`, на NVIDIA DMA-BUF + GL-рендерер GTK (12–15% CPU на монитор 1080p при 30 FPS); видео — GStreamer с аппаратным декодированием; пауза монитора под развёрнутым/полноэкранным окном или окном >90%, и всех мониторов при полноэкранном приложении на любом (настройки в галерее) |
 | GUI-галерея | этап 3 |
 
 ## Зависимости (Ubuntu 26.04)
@@ -57,6 +58,8 @@ WPE_GUI=1 scripts/nested-test.sh              # GUI галереи в nested-с�
 scripts/nested-test.sh                        # интеграционный тест в отдельной headless GNOME Shell
 WPE_SHELL_MODE=ubuntu WPE_MONITORS="1280x720 1024x768" scripts/nested-test.sh
 WPE_SCENES="beach 3582604159" scripts/nested-test.sh  # сцены: скриншоты, FPS, CPU/GPU, курсор, пауза, свойства
+WPE_CPU="web-interactive video-test" scripts/nested-test.sh  # CPU по процессам
+WPE_PAUSE=1 WPE_MONITORS="1920x1080 1280x720" WPE_EXT_SRC=gnome-extension/wpe@wpe.github.io scripts/nested-test.sh  # решения о паузе
 WPE_AUDIO=1 WPE_AUDIO_SCENES=3479671230 scripts/nested-test.sh  # аудиоспектр: свой pipewire+wireplumber
                          # (без устройств, null-sink по умолчанию), тестовый тон 220 Гц L / 3 кГц R
 ```

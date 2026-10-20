@@ -57,7 +57,8 @@ fi
 export WAYLAND_DISPLAY=${WPE_NESTED_DISPLAY:-wpe-nested-0}
 unset DISPLAY
 mkdir -p "$XDG_DATA_HOME/gnome-shell/extensions"
-cp -r "$REAL_DATA/gnome-shell/extensions/wpe@wpe.github.io" "$XDG_DATA_HOME/gnome-shell/extensions/"  # shell ignores symlinks
+# WPE_EXT_SRC=gnome-extension/wpe@wpe.github.io tests the extension from the tree instead of the installed one.
+cp -r "${WPE_EXT_SRC:-$REAL_DATA/gnome-shell/extensions/wpe@wpe.github.io}" "$XDG_DATA_HOME/gnome-shell/extensions/wpe@wpe.github.io"  # shell ignores symlinks
 
 gsettings set org.gnome.shell disable-user-extensions false
 gsettings set org.gnome.shell enabled-extensions "['wpe@wpe.github.io']"
@@ -135,6 +136,35 @@ fi
     echo "--- not ok (ListWallpapers status):"
     gdbus call --session -d io.github.wpe.Daemon -o /io/github/wpe/Daemon -m io.github.wpe.Daemon1.ListWallpapers \
         | python3 -c 'import ast,json,sys; [print(w["id"], w["status"], w["reason"]) for w in json.loads(ast.literal_eval(sys.stdin.read().strip()[1:-2])) if w["status"] != "ok"]'
+    kill $DAEMON_PID; sleep 1; kill $SHELL_PID; wait
+    exit 0
+fi
+
+# WPE_PAUSE=1 — pause decisions on two monitors: maximized window (that monitor
+# only), fullscreen window / borderless window over 90% (all monitors, setting
+# pause_on_fullscreen_any; off -> that monitor only). Needs WPE_MONITORS with two.
+if [ -n "${WPE_PAUSE:-}" ]; then
+    $G set '*' "${WPE_ID:-web-interactive}"; sleep 5
+    paused_now() { sleep 2.5; grep -oE '^\[pause\] [^:]+: [a-z]+' "$OUT/daemon.log" | awk '{s[$2]=$3} END {for (m in s) printf "%s%s ", m, s[m]; print ""}'; }
+    win() { GDK_BACKEND=wayland python3 scripts/maximized-window.py 4 "$1" "${2:-0}" & sleep 0.1; }
+    echo "pause: start:                $(paused_now)"
+    win maximized 0;  echo "pause: maximized on 0:       $(paused_now)"; wait $!; echo "pause: closed:               $(paused_now)"
+    win fullscreen 1; echo "pause: fullscreen on 1:      $(paused_now)"; wait $!; echo "pause: closed:               $(paused_now)"
+    win big 0;        echo "pause: window 95%x93% on 0:  $(paused_now)"; wait $!; echo "pause: closed:               $(paused_now)"
+    win borderless 0; echo "pause: borderless on 0:      $(paused_now)"; wait $!; echo "pause: closed:               $(paused_now)"
+    gdbus call --session -d io.github.wpe.Daemon -o /io/github/wpe/Daemon -m io.github.wpe.Daemon1.SetPauseOnFullscreenAny false >/dev/null
+    win fullscreen 1; echo "pause: fullscreen on 1, any=off: $(paused_now)"; wait $!; echo "pause: closed:               $(paused_now)"
+    kill $DAEMON_PID; sleep 1; kill $SHELL_PID; wait
+    exit 0
+fi
+
+# WPE_CPU="id1 id2" — CPU of the daemon tree (per process) for each wallpaper.
+if [ -n "${WPE_CPU:-}" ]; then
+    for ID in $WPE_CPU; do
+        $G set '*' "$ID"; sleep "${WPE_CPU_WAIT:-8}"
+        echo "cpu $ID:"; WPE_CPU_DETAIL=1 python3 scripts/proc-usage.py $DAEMON_PID 5
+        python3 scripts/rd-probe.py "$OUT/cpu-$ID-" shot:1 > /dev/null
+    done
     kill $DAEMON_PID; sleep 1; kill $SHELL_PID; wait
     exit 0
 fi

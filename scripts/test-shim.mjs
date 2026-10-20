@@ -9,13 +9,24 @@ let rafQueue = [];
 const events = [];
 const media = [{ paused: false, dataset: {}, pause() { this.paused = true; }, play() { this.paused = false; return Promise.resolve(); } }];
 const target = { dispatchEvent: (e) => events.push(e.type) };
+let clock = 0;
+const timers = [];
 const window = {
+  __wpeFps: 30,
+  performance: { now: () => clock },
   requestAnimationFrame: (cb) => { rafQueue.push(cb); return rafQueue.length; },
   cancelAnimationFrame: () => {},
 };
+const setTimeout = (fn, ms) => { timers.push([clock + (ms || 0), fn]); return timers.length; };
+// Advance the fake clock, firing due timers.
+function advance(ms) {
+  clock += ms;
+  for (const t of timers.splice(0).filter((t) => { if (t[0] <= clock) return true; timers.push(t); return false; })) t[1]();
+}
+const frame = () => { const q = rafQueue.splice(0); q.forEach((cb) => cb(clock)); return q.length; };
 class MouseEvent { constructor(type, init) { this.type = type; Object.assign(this, init); } }
 const ctx = vm.createContext({
-  window, MouseEvent, PointerEvent: MouseEvent,
+  window, MouseEvent, PointerEvent: MouseEvent, setTimeout,
   document: { elementFromPoint: () => target, body: target, querySelectorAll: () => media },
 });
 vm.runInContext(src, ctx);
@@ -53,6 +64,25 @@ assert.equal(rafQueue.length, 0, "rAF must be deferred while paused");
 wpe.setPaused(false);
 assert.equal(media[0].paused, false);
 assert.equal(rafQueue.length, 1);
-rafQueue[0]();
+frame();
 assert.equal(ran, 1);
+
+// rAF is limited to __wpeFps (30): a loop driven by a 144 Hz display runs ~30 times a second
+let calls = 0;
+const loop = () => { calls++; window.requestAnimationFrame(loop); };
+window.requestAnimationFrame(loop);
+for (let t = 0; t < 1000; t += 1000 / 144) { advance(1000 / 144); frame(); }
+assert.ok(calls >= 27 && calls <= 31, `30 fps cap, got ${calls}`);
+// several callbacks share one native frame; cancel works
+let a = 0, b = 0;
+advance(100);
+window.requestAnimationFrame(() => a++);
+const idb = window.requestAnimationFrame(() => b++);
+window.cancelAnimationFrame(idb);
+advance(100); frame();
+assert.equal(a, 1); assert.equal(b, 0);
+wpe.setFps(60);
+calls = 0;
+for (let t = 0; t < 1000; t += 1000 / 144) { advance(1000 / 144); frame(); }
+assert.ok(calls >= 55 && calls <= 61, `60 fps cap, got ${calls}`);
 console.log("shim.js: all tests passed");

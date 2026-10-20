@@ -29,6 +29,9 @@ pub struct State {
     /// Pause wallpapers while a maximized/fullscreen window covers the monitor.
     #[serde(default = "default_true")]
     pub pause_on_maximized: bool,
+    /// Pause every monitor while a fullscreen app (game) runs on any monitor.
+    #[serde(default = "default_true")]
+    pub pause_on_fullscreen_any: bool,
 }
 
 fn default_true() -> bool {
@@ -62,7 +65,7 @@ impl State {
         std::fs::read(path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_else(|| State { volume: default_volume(), muted: default_muted(), fps: default_fps(), pause_on_maximized: true, ..Default::default() })
+            .unwrap_or_else(|| State { volume: default_volume(), muted: default_muted(), fps: default_fps(), pause_on_maximized: true, pause_on_fullscreen_any: true, ..Default::default() })
     }
 
     /// Atomic write (tmp + rename).

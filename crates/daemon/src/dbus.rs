@@ -110,16 +110,24 @@ impl Service {
         Ok(())
     }
 
-    /// From the GNOME extension: monitor covered by fullscreen/maximized window.
+    /// From the GNOME extension: monitor covered by a maximized/fullscreen
+    /// window (or a window over 90% of it), or the screen is locked. The
+    /// daemon decides whether to pause (settings).
     fn set_paused(&self, monitor: &str, paused: bool) {
-        let mut c = self.core.lock().unwrap();
-        if paused && !c.state.pause_on_maximized {
-            return;
-        }
-        c.renderer.handle(RenderCmd::Pause { monitor: monitor.into(), paused });
+        self.core.lock().unwrap().set_covered(monitor, paused);
     }
 
-    /// JSON {fps, volume, muted, pause_on_maximized, monitors, directories}.
+    /// From the GNOME extension: a fullscreen app (fullscreen window, or the
+    /// focused window covering over 90% of its monitor) is on some monitor.
+    fn set_fullscreen_active(&self, active: bool) {
+        self.core.lock().unwrap().set_fullscreen_any(active);
+    }
+
+    fn set_pause_on_fullscreen_any(&self, on: bool) {
+        self.core.lock().unwrap().set_pause_on_fullscreen_any(on);
+    }
+
+    /// JSON {fps, volume, muted, pause_on_maximized, pause_on_fullscreen_any, monitors, directories}.
     fn get_settings(&self) -> String {
         self.core.lock().unwrap().settings_json()
     }

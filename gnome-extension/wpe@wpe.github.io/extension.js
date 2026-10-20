@@ -13,8 +13,9 @@
 //    overview workspaces);
 //  * forwards pointer motion/clicks on the empty desktop to the daemon
 //    (io.github.wpe.Daemon1.PointerEvent);
-//  * pauses a monitor's wallpaper when a maximized/fullscreen window covers it
-//    or the screen is locked (SetPaused).
+//  * pauses a monitor's wallpaper when a maximized/fullscreen window (or one
+//    over 90% of it) covers it or the screen is locked (SetPaused), and reports
+//    fullscreen apps on any monitor (SetFullscreenActive); the daemon decides.
 
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
@@ -521,10 +522,25 @@ class PointerForwarder {
 // Pause when covered by maximized/fullscreen windows or when locked.
 // ---------------------------------------------------------------------------
 
+const COVER_RATIO = 0.9;
+const FULL_RATIO = 0.995;
+
+// Share of monitor `index` covered by window `w`'s frame (0..1).
+function coverRatio(w, index) {
+    if (index < 0)
+        return 0;
+    const mon = global.display.get_monitor_geometry(index);
+    const r = w.get_frame_rect();
+    const iw = Math.min(r.x + r.width, mon.x + mon.width) - Math.max(r.x, mon.x);
+    const ih = Math.min(r.y + r.height, mon.y + mon.height) - Math.max(r.y, mon.y);
+    return iw > 0 && ih > 0 ? (iw * ih) / (mon.width * mon.height) : 0;
+}
+
 class AutoPause {
     constructor(renderers) {
         this._renderers = renderers;
         this._paused = new Map(); // connector -> bool (last sent)
+        this._fullscreenAny = null; // last sent SetFullscreenActive
         this._signals = []; // [obj, id]
         this._windowSignals = new Map();
         this._idleId = 0;
@@ -538,6 +554,7 @@ class AutoPause {
             this.queue();
         });
         on(global.display, 'restacked');
+        on(global.display, 'notify::focus-window');
         on(global.display, 'window-entered-monitor');
         on(global.display, 'window-left-monitor');
         on(global.workspace_manager, 'active-workspace-changed');
@@ -550,6 +567,7 @@ class AutoPause {
         this._watchId = Gio.bus_watch_name(Gio.BusType.SESSION, BUS_NAME, Gio.BusNameWatcherFlags.NONE,
             () => {
                 this._paused.clear();
+                this._fullscreenAny = null;
                 this.queue();
             }, null);
         this.queue();
@@ -574,13 +592,17 @@ class AutoPause {
                 callDaemon('SetPaused', '(sb)', [connector, false]);
         }
         this._paused.clear();
+        if (this._fullscreenAny)
+            callDaemon('SetFullscreenActive', '(b)', [false]);
+        this._fullscreenAny = null;
     }
 
     _track(w) {
         if (!w || this._windowSignals.has(w))
             return;
         const ids = ['notify::maximized-horizontally', 'notify::maximized-vertically',
-            'notify::fullscreen', 'notify::minimized'].map(s => w.connect(s, () => this.queue()));
+            'notify::fullscreen', 'notify::minimized', 'size-changed', 'position-changed']
+            .map(s => w.connect(s, () => this.queue()));
         ids.push(w.connect('unmanaged', () => {
             ids.forEach(id => w.disconnect(id));
             this._windowSignals.delete(w);
@@ -600,17 +622,32 @@ class AutoPause {
     }
 
     _update() {
+        // covered: monitor hidden by a fullscreen/maximized window or a window
+        // over COVER_RATIO of it (borderless "windowed fullscreen" games);
+        // fullscreenAny: a fullscreen app runs (fullscreen, or the focused
+        // window covering its whole monitor, top bar included — borderless
+        // games; a maximized window never does) — the daemon may pause all.
         const covered = new Set();
+        let fullscreenAny = false;
         const locked = Main.sessionMode.isLocked;
         if (!locked) {
             const ws = global.workspace_manager.get_active_workspace();
+            const focus = global.display.focus_window;
             for (const w of ws.list_windows()) {
                 if (isRenderer(w) || isDingWindow(w) || w.skip_taskbar ||
                     w.get_window_type() === Meta.WindowType.DESKTOP || !w.showing_on_its_workspace())
                     continue;
-                if (w.fullscreen || w.is_maximized())
-                    covered.add(w.get_monitor());
+                const m = w.get_monitor();
+                const ratio = coverRatio(w, m);
+                if (w.fullscreen || w.is_maximized() || ratio > COVER_RATIO)
+                    covered.add(m);
+                if (w.fullscreen || (w === focus && ratio > FULL_RATIO))
+                    fullscreenAny = true;
             }
+        }
+        if (this._fullscreenAny !== fullscreenAny) {
+            this._fullscreenAny = fullscreenAny;
+            callDaemon('SetFullscreenActive', '(b)', [fullscreenAny]);
         }
         for (const connector of this._renderers.connectors()) {
             const index = monitorIndexForConnector(connector);

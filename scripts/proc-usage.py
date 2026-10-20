@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CPU usage of a process and all its descendants over an interval, plus RSS
 and per-process GPU utilisation (nvidia-smi pmon, if available).
-usage: proc-usage.py PID [SECONDS]"""
+usage: proc-usage.py PID [SECONDS]   (WPE_CPU_DETAIL=1: also per process)"""
 import os
 import subprocess
 import sys
@@ -51,8 +51,18 @@ def rss_mb(pids):
 root, sec = int(sys.argv[1]), float(sys.argv[2]) if len(sys.argv) > 2 else 5
 pids = tree(root)
 t0 = ticks(pids)
+each0 = {p: ticks([p]) for p in pids}
 time.sleep(sec)
 pids = tree(root)
+if os.environ.get("WPE_CPU_DETAIL"):
+    for p in pids:
+        c = (ticks([p]) - each0.get(p, 0)) / TICK / sec * 100
+        if c >= 0.5:
+            try:
+                name = open(f"/proc/{p}/comm").read().strip()
+            except OSError:
+                name = "?"
+            print(f"  {p} {name}: {c:.1f}%")
 cpu = (ticks(pids) - t0) / TICK / sec * 100
 gpu = "n/a"
 try:

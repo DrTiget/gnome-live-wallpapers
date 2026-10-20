@@ -614,11 +614,19 @@ fn settings_dialog(ui: &Rc<Ui>) {
 
     let pause = adw::SwitchRow::new();
     pause.set_title("Пауза при развёрнутом окне");
-    pause.set_subtitle("Останавливать обои, когда монитор закрыт окном на весь экран");
+    pause.set_subtitle("Останавливать обои монитора, закрытого развёрнутым окном или окном больше 90% экрана");
     pause.set_active(st["pause_on_maximized"].as_bool().unwrap_or(true));
     let u = ui.clone();
     pause.connect_active_notify(move |r| { u.call("SetPauseOnMaximized", &(r.is_active(),)); });
     g.add(&pause);
+
+    let pause_fs = adw::SwitchRow::new();
+    pause_fs.set_title("Пауза при полноэкранном приложении");
+    pause_fs.set_subtitle("Останавливать обои на всех мониторах, пока на любом из них игра или другое приложение на весь экран");
+    pause_fs.set_active(st["pause_on_fullscreen_any"].as_bool().unwrap_or(true));
+    let u = ui.clone();
+    pause_fs.connect_active_notify(move |r| { u.call("SetPauseOnFullscreenAny", &(r.is_active(),)); });
+    g.add(&pause_fs);
     page.add(&g);
 
     let dirs = adw::PreferencesGroup::new();

@@ -9,6 +9,8 @@ mod state;
 mod webpath;
 #[cfg(feature = "gtk")]
 mod gtk_renderer;
+#[cfg(feature = "gtk")]
+mod video;
 
 use std::sync::{Arc, Mutex};
 
@@ -34,9 +36,30 @@ fn main() -> zbus::Result<()> {
     }
 }
 
+/// Rendering setup for the NVIDIA proprietary driver, unless overridden in
+/// the environment. WebKitGTK disables its DMA-BUF renderer there and sends
+/// every frame through shared memory, which the UI process copies on the CPU
+/// (~100% of a core for one animated 1440p page); GTK's default Vulkan
+/// renderer imports WebKit's DMA-BUFs slowly on that driver as well. Forced
+/// DMA-BUF + the GL renderer keeps frames on the GPU (measured: daemon and
+/// web process 170% -> under 40% for two animated 60 fps pages).
+#[cfg(feature = "gtk")]
+fn gpu_env_defaults() {
+    if !std::path::Path::new("/proc/driver/nvidia/version").exists() {
+        return;
+    }
+    for (k, v) in [("WEBKIT_FORCE_DMABUF_RENDERER", "1"), ("GSK_RENDERER", "ngl")] {
+        if std::env::var_os(k).is_none() {
+            // Still single-threaded: GTK/WebKit are not initialized yet.
+            std::env::set_var(k, v);
+        }
+    }
+}
+
 #[cfg(feature = "gtk")]
 fn main() -> gtk4::glib::ExitCode {
     use gtk4::prelude::*;
+    gpu_env_defaults();
     let app = gtk4::Application::builder().application_id("io.github.wpe.Renderer").build();
     app.connect_activate(|app| {
         let _hold = app.hold();

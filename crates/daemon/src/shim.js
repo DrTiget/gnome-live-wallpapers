@@ -6,22 +6,43 @@
   const pausedListeners = [];
   let pending = null; // properties received before the page registered its listener
 
-  // Real pause: defer requestAnimationFrame callbacks and pause media while
-  // the wallpaper is covered (WE stops rendering in that case as well).
+  // requestAnimationFrame runs at most `fps` times a second (the daemon's
+  // frame rate limit; a background must not render at 144 Hz) and not at all
+  // while paused (covered wallpaper; WE stops rendering then as well).
+  // Callbacks are queued and run together in one native frame.
   let paused = false;
+  let interval = 1000 / (window.__wpeFps || 30);
   const nativeRAF = window.requestAnimationFrame.bind(window);
-  const nativeCAF = window.cancelAnimationFrame.bind(window);
-  const deferred = new Map();
-  let fakeId = 1 << 30;
+  const queued = new Map(); // id -> callback
+  let nextId = 1;
+  let timer = null;
+  let nextFrame = 0; // performance.now() of the earliest next frame
+  const now = () => (window.performance ? window.performance.now() : Date.now());
+  function runFrame(ts) {
+    timer = null;
+    if (paused) return;
+    // Keep a steady cadence (vsync rounding must not lower the rate); after
+    // a pause or an idle page start over from now.
+    const t = now();
+    nextFrame = t - nextFrame > interval ? t + interval : nextFrame + interval;
+    const cbs = [...queued.values()];
+    queued.clear();
+    for (const cb of cbs) {
+      try { cb(ts); } catch (e) { setTimeout(() => { throw e; }); }
+    }
+  }
+  function schedule() {
+    if (timer !== null || paused || queued.size === 0) return;
+    const wait = nextFrame - now();
+    timer = wait > 0 ? setTimeout(() => { timer = nativeRAF(runFrame); }, wait) : nativeRAF(runFrame);
+  }
   window.requestAnimationFrame = function (cb) {
-    if (!paused) return nativeRAF(cb);
-    const id = ++fakeId;
-    deferred.set(id, cb);
+    const id = nextId++;
+    queued.set(id, cb);
+    schedule();
     return id;
   };
-  window.cancelAnimationFrame = function (id) {
-    if (!deferred.delete(id)) nativeCAF(id);
-  };
+  window.cancelAnimationFrame = function (id) { queued.delete(id); };
   function setMediaPaused(p) {
     for (const m of document.querySelectorAll("video, audio")) {
       if (p && !m.paused) { m.dataset.wpePaused = "1"; m.pause(); }
@@ -59,14 +80,11 @@
       if (p === paused) return;
       paused = p;
       setMediaPaused(p);
-      if (!p) {
-        const cbs = [...deferred.values()];
-        deferred.clear();
-        cbs.forEach((cb) => nativeRAF(cb));
-      }
+      if (!p) schedule();
       if (listener && listener.setPaused) listener.setPaused(p);
       pausedListeners.forEach((cb) => cb({ paused: p }));
     },
+    setFps(fps) { interval = 1000 / Math.max(1, fps); },
     // 128 floats: 64 left + 64 right channel, 0..~1.
     audio(samples) { for (const cb of audioListeners) cb(samples); },
     // Synthesised pointer events from the GNOME extension (desktop is below all windows).

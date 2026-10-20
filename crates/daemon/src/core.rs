@@ -2,7 +2,7 @@
 
 use crate::state::State;
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use we_core::{Catalog, Project, ProjectType, ValidationIssue};
@@ -90,12 +90,19 @@ pub struct Core {
     pub renderer: Box<dyn Renderer>,
     /// Scene id -> why linux-wallpaperengine can't render it (from its scene file, at rescan).
     pub scene_unsupported: HashMap<String, String>,
+    /// From the extension: monitors covered by a maximized/fullscreen window (or locked).
+    pub covered: HashSet<String>,
+    /// From the extension: a fullscreen app runs on some monitor.
+    pub fullscreen_any: bool,
+    /// Pause state last sent to the renderer.
+    pub paused: HashSet<String>,
 }
 
 impl Core {
     pub fn new(state_path: PathBuf, monitors: Vec<String>, renderer: Box<dyn Renderer>) -> Core {
         let state = State::load(&state_path);
-        let mut core = Core { state, state_path, catalog: Catalog::default(), monitors, renderer, scene_unsupported: HashMap::new() };
+        let mut core = Core { state, state_path, catalog: Catalog::default(), monitors, renderer, scene_unsupported: HashMap::new(),
+            covered: HashSet::new(), fullscreen_any: false, paused: HashSet::new() };
         core.rescan();
         core
     }
@@ -174,11 +181,12 @@ impl Core {
         Value::Array(items).to_string()
     }
 
-    /// Settings for the GUI: {fps, volume, muted, pause_on_maximized, monitors, directories}.
+    /// Settings for the GUI: {fps, volume, muted, pause_on_maximized, pause_on_fullscreen_any, monitors, directories}.
     pub fn settings_json(&self) -> String {
         json!({
             "fps": self.state.fps, "volume": self.state.volume, "muted": self.state.muted,
             "pause_on_maximized": self.state.pause_on_maximized,
+            "pause_on_fullscreen_any": self.state.pause_on_fullscreen_any,
             "monitors": self.monitors, "directories": self.state.extra_dirs,
         })
         .to_string()
@@ -193,9 +201,48 @@ impl Core {
     pub fn set_pause_on_maximized(&mut self, on: bool) {
         self.state.pause_on_maximized = on;
         self.persist();
-        if !on {
-            for m in self.monitors.clone() {
-                self.renderer.handle(RenderCmd::Pause { monitor: m, paused: false });
+        self.update_pause();
+    }
+
+    pub fn set_pause_on_fullscreen_any(&mut self, on: bool) {
+        self.state.pause_on_fullscreen_any = on;
+        self.persist();
+        self.update_pause();
+    }
+
+    /// Facts from the extension; the pause decision (with settings) is made here.
+    pub fn set_covered(&mut self, monitor: &str, covered: bool) {
+        if covered {
+            self.covered.insert(monitor.into());
+        } else {
+            self.covered.remove(monitor);
+        }
+        self.update_pause();
+    }
+
+    pub fn set_fullscreen_any(&mut self, on: bool) {
+        self.fullscreen_any = on;
+        self.update_pause();
+    }
+
+    /// Monitor paused if covered (setting pause_on_maximized) or a fullscreen
+    /// app runs anywhere (setting pause_on_fullscreen_any); sends changes only.
+    fn update_pause(&mut self) {
+        let all = self.fullscreen_any && self.state.pause_on_fullscreen_any;
+        let mut names: Vec<String> = self.monitors.clone();
+        names.extend(self.covered.iter().chain(self.paused.iter()).cloned());
+        names.sort();
+        names.dedup();
+        for m in names {
+            let want = all || (self.state.pause_on_maximized && self.covered.contains(&m));
+            if want != self.paused.contains(&m) {
+                if want {
+                    self.paused.insert(m.clone());
+                } else {
+                    self.paused.remove(&m);
+                }
+                eprintln!("[pause] {m}: {}", if want { "paused" } else { "playing" });
+                self.renderer.handle(RenderCmd::Pause { monitor: m, paused: want });
             }
         }
     }
@@ -276,5 +323,75 @@ impl Core {
         if let Some(p) = self.effective_project(id) {
             self.renderer.handle(RenderCmd::Properties { wallpaper: id.into(), user_properties: p.properties.to_user_properties() });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct Rec(Arc<Mutex<Vec<(String, bool)>>>);
+    impl Renderer for Rec {
+        fn handle(&mut self, cmd: RenderCmd) {
+            if let RenderCmd::Pause { monitor, paused } = cmd {
+                self.0.lock().unwrap().push((monitor, paused));
+            }
+        }
+    }
+
+    fn core() -> (Core, Arc<Mutex<Vec<(String, bool)>>>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(vec![]));
+        let mut state = State::load(&dir.path().join("none.json"));
+        state.extra_dirs.clear();
+        let mut c = Core {
+            state,
+            state_path: dir.path().join("state.json"),
+            catalog: Catalog::default(),
+            monitors: vec!["DP-1".into(), "HDMI-1".into()],
+            renderer: Box::new(Rec(log.clone())),
+            scene_unsupported: HashMap::new(),
+            covered: HashSet::new(),
+            fullscreen_any: false,
+            paused: HashSet::new(),
+        };
+        c.update_pause();
+        (c, log, dir)
+    }
+
+    fn take(log: &Arc<Mutex<Vec<(String, bool)>>>) -> Vec<(String, bool)> {
+        std::mem::take(&mut *log.lock().unwrap())
+    }
+
+    #[test]
+    fn covered_monitor_pauses_only_itself() {
+        let (mut c, log, _d) = core();
+        assert!(take(&log).is_empty());
+        c.set_covered("DP-1", true);
+        c.set_covered("DP-1", true);
+        assert_eq!(take(&log), [("DP-1".into(), true)]);
+        c.set_pause_on_maximized(false);
+        assert_eq!(take(&log), [("DP-1".into(), false)]);
+        c.set_pause_on_maximized(true);
+        assert_eq!(take(&log), [("DP-1".into(), true)]);
+        c.set_covered("DP-1", false);
+        assert_eq!(take(&log), [("DP-1".into(), false)]);
+    }
+
+    #[test]
+    fn fullscreen_app_pauses_every_monitor() {
+        let (mut c, log, _d) = core();
+        c.set_covered("HDMI-1", true);
+        take(&log);
+        c.set_fullscreen_any(true);
+        assert_eq!(take(&log), [("DP-1".into(), true)]);
+        c.set_pause_on_fullscreen_any(false);
+        assert_eq!(take(&log), [("DP-1".into(), false)]);
+        c.set_pause_on_fullscreen_any(true);
+        c.set_fullscreen_any(false);
+        let l = take(&log);
+        assert_eq!(l, [("DP-1".into(), true), ("DP-1".into(), false)]);
+        assert!(c.paused.contains("HDMI-1"));
     }
 }
