@@ -47,3 +47,9 @@ are taken from a fontconfig match (needs `libfontconfig-dev` to build).
 `0007-text-script-import-init.patch`: text layer scripts with `import * as WEMath
 from 'WEMath'` no longer fail with a syntax error (the placeholder text, e.g.
 "trackname", stayed on screen); `init(value)` result replaces the text as in WE.
+
+`0008-album-art-get-tex-image.patch`: `AlbumTexture::copyContents` (copy of the
+previous media album art on every art change) called `glGetnTexImage`, which GLEW
+leaves NULL on EGL/Wayland contexts (NVIDIA): SIGSEGV on the second art change,
+usually right after a pause ended (media events are handled when rendering resumes).
+Uses `glGetTexImage` (buffer is sized for level 0 RGBA8).

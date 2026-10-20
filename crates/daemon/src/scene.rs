@@ -142,15 +142,25 @@ pub fn unsupported_reason(root: &Path, file: Option<&str>) -> Option<String> {
     None
 }
 
-/// Short crash reason from the renderer's last output lines: the last line
-/// that looks like an error, else the last non-empty one.
+/// Why the renderer died. `status` is the raw wait status (glib child
+/// watch). Killed by a signal: that signal is the reason (its last output
+/// lines are often unrelated warnings, e.g. GLFW "setting the window
+/// position" on Wayland). Exited with an error: the last line that looks
+/// like an error (GLFW warnings skipped), else the last non-empty one.
 pub fn crash_reason(lines: &[String], status: i32) -> String {
+    let signal = status & 0x7f;
+    if signal != 0 {
+        return format!("рендерер сцен упал: {} (сигнал {signal})", signal_name(signal));
+    }
     const MARKS: [&str; 7] = ["error", "exception", "failed", "missing", "must ", "cannot", "unsupported"];
+    let relevant = |l: &&String| !l.trim().is_empty() && !l.contains("GLFW error");
     let pick = lines
         .iter()
         .rev()
+        .filter(relevant)
         .find(|l| MARKS.iter().any(|m| l.to_lowercase().contains(m)))
-        .or_else(|| lines.iter().rev().find(|l| !l.trim().is_empty()));
+        .or_else(|| lines.iter().rev().find(relevant));
+    let code = (status >> 8) & 0xff;
     match pick {
         Some(l) => {
             let l = l.trim();
@@ -160,7 +170,44 @@ pub fn crash_reason(lines: &[String], status: i32) -> String {
             }
             format!("рендерер сцен упал: {s}")
         }
-        None => format!("рендерер сцен завершился при запуске (статус {status})"),
+        None => format!("рендерер сцен завершился с кодом {code}"),
+    }
+}
+
+fn signal_name(sig: i32) -> String {
+    match sig {
+        4 => "SIGILL".into(),
+        6 => "SIGABRT".into(),
+        7 => "SIGBUS".into(),
+        8 => "SIGFPE".into(),
+        9 => "SIGKILL".into(),
+        11 => "SIGSEGV".into(),
+        15 => "SIGTERM".into(),
+        n => format!("сигнал {n}"),
+    }
+}
+
+/// Automatic restarts of a crashed scene: at most `MAX` within `WINDOW`,
+/// with growing delays; after that the scene stays down (status broken).
+#[derive(Default)]
+pub struct RestartPolicy {
+    crashes: Vec<std::time::Instant>,
+}
+
+impl RestartPolicy {
+    pub const MAX: usize = 3;
+    pub const WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
+    const DELAYS: [u64; 3] = [2, 5, 15];
+
+    /// A crash at `now`: delay before the restart, or `None` to give up.
+    pub fn on_crash(&mut self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.crashes.retain(|t| now.duration_since(*t) < Self::WINDOW);
+        if self.crashes.len() >= Self::MAX {
+            return None;
+        }
+        let delay = Self::DELAYS[self.crashes.len()];
+        self.crashes.push(now);
+        Some(std::time::Duration::from_secs(delay))
     }
 }
 
@@ -270,12 +317,32 @@ mod tests {
     #[test]
     fn crash_reasons() {
         let l = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // exit(1): raw wait status 256
         assert_eq!(
-            crash_reason(&l(&["Running with: x", "General section must have orthogonal projection info", "bye"]), 1),
+            crash_reason(&l(&["Running with: x", "General section must have orthogonal projection info", "bye"]), 256),
             "рендерер сцен упал: General section must have orthogonal projection info"
         );
-        assert_eq!(crash_reason(&l(&["a", "last line", ""]), 1), "рендерер сцен упал: last line");
-        assert!(crash_reason(&[], 139).contains("139"));
+        assert_eq!(crash_reason(&l(&["a", "last line", ""]), 256), "рендерер сцен упал: last line");
+        assert_eq!(crash_reason(&[], 256), "рендерер сцен завершился с кодом 1");
+        // SIGSEGV with core (139): the signal, not the last GLFW warning
+        let glfw = l(&["GLFW error 65548: Wayland: The platform does not support setting the window position"]);
+        assert_eq!(crash_reason(&glfw, 139), "рендерер сцен упал: SIGSEGV (сигнал 11)");
+        assert_eq!(crash_reason(&glfw, 256), "рендерер сцен завершился с кодом 1");
+    }
+
+    #[test]
+    fn restart_backoff() {
+        use std::time::{Duration, Instant};
+        let mut p = RestartPolicy::default();
+        let t0 = Instant::now();
+        assert_eq!(p.on_crash(t0), Some(Duration::from_secs(2)));
+        assert_eq!(p.on_crash(t0 + Duration::from_secs(10)), Some(Duration::from_secs(5)));
+        assert_eq!(p.on_crash(t0 + Duration::from_secs(30)), Some(Duration::from_secs(15)));
+        assert_eq!(p.on_crash(t0 + Duration::from_secs(60)), None, "4th crash within 5 min: give up");
+        // the window slides: old crashes are forgotten
+        assert_eq!(p.on_crash(t0 + Duration::from_secs(331)), Some(Duration::from_secs(2)));
+        assert_eq!(p.on_crash(t0 + Duration::from_secs(340)), Some(Duration::from_secs(5)));
+        assert_eq!(p.on_crash(t0 + Duration::from_secs(700)), Some(Duration::from_secs(2)));
     }
 
     #[test]

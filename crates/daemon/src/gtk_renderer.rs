@@ -77,6 +77,11 @@ struct Surface {
 
 thread_local! {
     static SURFACES: RefCell<HashMap<String, Surface>> = RefCell::new(HashMap::new());
+    /// Bumped whenever a monitor's wallpaper is replaced or cleared, so a
+    /// pending automatic restart of a crashed scene knows it is stale.
+    static GENERATION: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+    /// Crash history per monitor for automatic scene restarts.
+    static RESTARTS: RefCell<HashMap<String, scene::RestartPolicy>> = RefCell::new(HashMap::new());
     static APP: RefCell<Option<gtk4::Application>> = const { RefCell::new(None) };
     static VOLUME: RefCell<(f64, bool)> = const { RefCell::new((0.5, true)) };
     static FPS: Cell<u32> = const { Cell::new(crate::state::DEFAULT_FPS) };
@@ -119,7 +124,12 @@ pub fn set_application(app: &gtk4::Application) {
     APP.with(|a| *a.borrow_mut() = Some(app.clone()));
 }
 
+fn generation(monitor: &str) -> u64 {
+    GENERATION.with(|g| g.borrow().get(monitor).copied().unwrap_or(0))
+}
+
 fn close(monitor: &str) {
+    GENERATION.with(|g| *g.borrow_mut().entry(monitor.to_string()).or_insert(0) += 1);
     SURFACES.with(|s| {
         if let Some(surf) = s.borrow_mut().remove(monitor) {
             // A destroyed view keeps its web process (and the page's timers) alive.
@@ -165,6 +175,8 @@ fn make_window(monitor: &str) -> gtk4::ApplicationWindow {
 
 fn show(monitor: String, project: Project) {
     close(&monitor);
+    // Chosen (again) on purpose: a fresh restart budget.
+    RESTARTS.with(|r| r.borrow_mut().remove(&monitor));
     let id = project.id();
     if project.kind == ProjectType::Scene {
         let props = project.properties.to_user_properties();
@@ -293,7 +305,7 @@ fn start_scene(monitor: &str, wallpaper: &str, root: &std::path::Path, props: &s
         });
     }
     let alive = Rc::new(Cell::new(true));
-    let (alive2, mon, id) = (alive.clone(), monitor.to_string(), wallpaper.to_string());
+    let (alive2, mon, id, scene_root) = (alive.clone(), monitor.to_string(), wallpaper.to_string(), root.to_path_buf());
     glib::child_watch_add_local(glib::Pid(pid as i32), move |_, status| {
         alive2.set(false);
         eprintln!("[scene] {mon}: pid {pid} exited, status {status}");
@@ -301,17 +313,24 @@ fn start_scene(monitor: &str, wallpaper: &str, root: &std::path::Path, props: &s
             matches!(s.borrow().get(&mon), Some(Surface { content: Content::Scene(p), .. }) if p.child.id() == pid)
         });
         if current {
-            // Crashed on its own: forget it, the desktop falls back to the normal background.
+            // Crashed on its own: forget it (the normal background shows meanwhile)
+            // and restart it a few times with growing delays before giving up.
             SURFACES.with(|s| s.borrow_mut().remove(&mon));
             dbus::set_renderer_pid(&mon, None);
-            // Give the output readers a moment to drain, then report it as broken.
-            let (tail, id) = (tail.clone(), id.clone());
+            let delay = RESTARTS.with(|r| r.borrow_mut().entry(mon.clone()).or_default().on_crash(std::time::Instant::now()));
+            let (tail, id, root, mon, gen) = (tail.clone(), id.clone(), scene_root.clone(), mon.clone(), generation(&mon));
+            // Give the output readers a moment to drain.
             glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || {
                 let lines: Vec<String> = tail.lock().unwrap().iter().cloned().collect();
                 let reason = scene::crash_reason(&lines, status);
-                eprintln!("[scene] {id}: broken: {reason}");
-                crate::core::RUNTIME_BROKEN.lock().unwrap().insert(id, reason);
-                dbus::emit_catalog_changed();
+                let Some(delay) = delay else {
+                    eprintln!("[scene] {id}: broken ({} crashes in 5 min, not restarting): {reason}", scene::RestartPolicy::MAX + 1);
+                    crate::core::RUNTIME_BROKEN.lock().unwrap().insert(id, reason);
+                    dbus::emit_catalog_changed();
+                    return;
+                };
+                eprintln!("[scene] {mon}: {reason}; restarting {id} in {}s", delay.as_secs());
+                glib::timeout_add_local_once(delay, move || restart_crashed(&mon, &id, &root, gen));
             });
         }
     });
@@ -328,6 +347,24 @@ fn start_scene(monitor: &str, wallpaper: &str, root: &std::path::Path, props: &s
     }
     dbus::set_renderer_pid(monitor, Some(pid));
     Some(p)
+}
+
+/// Automatic restart after a crash, unless the monitor got another wallpaper
+/// (or none) meanwhile or the extension went away.
+fn restart_crashed(monitor: &str, wallpaper: &str, root: &std::path::Path, gen: u64) {
+    let occupied = SURFACES.with(|s| s.borrow().contains_key(monitor));
+    if occupied || generation(monitor) != gen || !SHELL_READY.load(Ordering::SeqCst) {
+        return;
+    }
+    let props = PROPS
+        .with(|p| p.borrow().get(wallpaper).cloned())
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or(serde_json::Value::Null);
+    if let Some(p) = start_scene(monitor, wallpaper, root, &props) {
+        SURFACES.with(|s| {
+            s.borrow_mut().insert(monitor.into(), Surface { window: None, wallpaper: wallpaper.into(), content: Content::Scene(p), audio: false })
+        });
+    }
 }
 
 /// Restart scene subprocesses (new properties, fps or volume); `only` limits it to one wallpaper.

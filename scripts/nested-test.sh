@@ -140,6 +140,50 @@ fi
     exit 0
 fi
 
+# WPE_MEDIA_SCENE=<id> — scene with media integration: album art changes
+# (fake MPRIS PropertiesChanged on the private bus) while pausing/resuming it;
+# the renderer must survive (linux-wallpaperengine crashed in AlbumTexture).
+if [ -n "${WPE_MEDIA_SCENE:-}" ]; then
+    for c in 1 2; do python3 -c "import zlib,struct,sys
+w=h=64; px=bytes([200*(sys.argv[1]=='1'),80,200*(sys.argv[1]=='2'),255])*w
+raw=b''.join(b'\\0'+px for _ in range(h))
+ch=lambda t,d: struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d))
+open(sys.argv[2],'wb').write(b'\\x89PNG\\r\\n\\x1a\\n'+ch(b'IHDR',struct.pack('>IIBBBBB',w,h,8,6,0,0,0))+ch(b'IDAT',zlib.compress(raw))+ch(b'IEND',b''))" $c "$OUT/art$c.png"; done
+    art() {
+        gdbus emit --session --object-path /org/mpris/MediaPlayer2 --signal org.freedesktop.DBus.Properties.PropertiesChanged \
+            "'org.mpris.MediaPlayer2.Player'" "{'Metadata': <{'mpris:artUrl': <'file://$OUT/art$1.png'>, 'xesam:title': <'track $1'>, 'xesam:artist': <['wpe']>}>, 'PlaybackStatus': <'Playing'>}" "@as []"
+    }
+    $G set '*' "$WPE_MEDIA_SCENE"; sleep "${WPE_SCENE_WAIT:-12}"
+    PID=$(renderer_pid); echo "media: scene pid $PID"
+    for i in 1 2 3 4 5 6; do
+        art $(( i % 2 + 1 )); sleep 1.5
+        GDK_BACKEND=wayland python3 scripts/maximized-window.py 2 & MAXW=$!
+        sleep 0.5; art $(( (i + 1) % 2 + 1 )); wait $MAXW; sleep 1.5
+        if ! kill -0 "$PID" 2>/dev/null; then echo "media: round $i: renderer DIED"; break; fi
+        echo "media: round $i: alive (pid $(renderer_pid))"
+    done
+    grep -E "^\[scene\]|^\[pause\]" "$OUT/daemon.log" | tail -8
+    kill $DAEMON_PID; sleep 1; kill $SHELL_PID; wait
+    exit 0
+fi
+
+# WPE_CRASH_SCENE=<id> — automatic restart: SIGSEGV the scene renderer 4 times;
+# expected 3 restarts (2/5/15 s), then status broken with "SIGSEGV" as reason.
+if [ -n "${WPE_CRASH_SCENE:-}" ]; then
+    $G set '*' "$WPE_CRASH_SCENE"; sleep "${WPE_SCENE_WAIT:-12}"
+    for i in 1 2 3 4; do
+        PID=$(renderer_pid); echo "crash: round $i: killing pid $PID with SIGSEGV"
+        [ -n "$PID" ] && kill -SEGV "$PID"
+        for _ in $(seq 25); do sleep 1; NEW=$(renderer_pid); [ -n "$NEW" ] && [ "$NEW" != "$PID" ] && break; done
+        echo "crash: round $i: renderer now [${NEW:-none}]"
+    done
+    grep -E "^\[scene\]" "$OUT/daemon.log" | grep -v "^\[scene\] /"
+    gdbus call --session -d io.github.wpe.Daemon -o /io/github/wpe/Daemon -m io.github.wpe.Daemon1.ListWallpapers \
+        | python3 -c 'import ast,json,sys; [print("crash: status", w["id"], w["status"], w["reason"]) for w in json.loads(ast.literal_eval(sys.stdin.read().strip()[1:-2])) if w["id"] == sys.argv[1]]' "$WPE_CRASH_SCENE"
+    kill $DAEMON_PID; sleep 1; kill $SHELL_PID; wait
+    exit 0
+fi
+
 # WPE_PAUSE=1 — pause decisions on two monitors: maximized window (that monitor
 # only), fullscreen window / borderless window over 90% (all monitors, setting
 # pause_on_fullscreen_any; off -> that monitor only). Needs WPE_MONITORS with two.

@@ -48,7 +48,7 @@
 
 | Метод | Сигнатура | Кто вызывает |
 |---|---|---|
-| `ListWallpapers() → s` | JSON `[{id,title,type,supported,status,reason,preview,root,tags,audio,rating}]`; `status`: `ok` / `unsupported` (тип не поддерживается, 3D-сцена с перспективной камерой) / `broken` (проблемы валидации или рендерер упал при старте), `reason` — причина | галерея |
+| `ListWallpapers() → s` | JSON `[{id,title,type,supported,status,reason,preview,root,tags,audio,rating}]`; `status`: `ok` / `unsupported` (тип не поддерживается, 3D-сцена с перспективной камерой) / `broken` (проблемы валидации или рендерер сцены упал 4 раза за 5 минут; упавшая сцена перезапускается автоматически через 2/5/15 с; причина — сигнал (`SIGSEGV`), если процесс убит сигналом, иначе строка ошибки из его вывода без предупреждений GLFW), `reason` — причина | галерея |
 | `Rescan()` | пересканировать Workshop + `~/.local/share/wpe/wallpapers` + `extra_dirs` | галерея |
 | `SetWallpaper(s monitor, s id)` | `monitor` = connector или `"*"`; пустой `id` снимает | галерея |
 | `GetAssignments() → a{ss}` | | галерея |

@@ -1,0 +1,36 @@
+From 3fa1d928414daa9b3e89ec687f7d464e2df681ee Mon Sep 17 00:00:00 2001
+From: WPE <wpe@localhost>
+Date: Wed, 21 Oct 2026 00:16:26 +0200
+Subject: [PATCH] Album art: read the texture with glGetTexImage,
+ glGetnTexImage may be NULL
+
+AlbumTexture::copyContents (the previous-thumbnail copy on every media album
+art change) called glGetnTexImage through GLEW. On contexts where GLEW does
+not load it (EGL on Wayland, NVIDIA) the pointer is NULL and the renderer
+crashed with SIGSEGV on the second art change, typically right after a pause
+ended (media events are processed when rendering resumes). The buffer is
+sized for level 0 RGBA8, so glGetTexImage is safe here.
+---
+ src/WallpaperEngine/Render/AlbumTexture.cpp | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/WallpaperEngine/Render/AlbumTexture.cpp b/src/WallpaperEngine/Render/AlbumTexture.cpp
+index 2769c0b..451739f 100644
+--- a/src/WallpaperEngine/Render/AlbumTexture.cpp
++++ b/src/WallpaperEngine/Render/AlbumTexture.cpp
+@@ -75,7 +75,11 @@ void AlbumTexture::copyContents (const TextureProvider& other) const noexcept {
+ 
+     // Read the source texture
+     glBindTexture (GL_TEXTURE_2D, other.getTextureID (0));
+-    glGetnTexImage (GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, bufferSize, buffer);
++    // glGetnTexImage (GL 4.5 / ARB_robustness) is not loaded by GLEW on every
++    // context (EGL on Wayland: NULL pointer -> SIGSEGV on the second album art
++    // change); the buffer is sized for level 0 RGBA8 anyway, so the GL 1.1 call is safe.
++    glPixelStorei (GL_PACK_ALIGNMENT, 4);
++    glGetTexImage (GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, buffer);
+ 
+     // Upload into another texture
+     glBindTexture (GL_TEXTURE_2D, this->m_textureID);
+-- 
+2.53.0
+
