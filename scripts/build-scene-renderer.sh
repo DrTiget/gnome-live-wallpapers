@@ -9,7 +9,7 @@ set -euo pipefail
 UPSTREAM=https://github.com/Almamu/linux-wallpaperengine.git
 UPSTREAM_COMMIT=b016d7d
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-PATCH=$REPO/third_party/linux-wallpaperengine/0001-control-stdin.patch
+PATCHES=$REPO/third_party/linux-wallpaperengine
 SRC=${1:-$HOME/src/linux-wallpaperengine}
 PREFIX=$HOME/.local/lib/linux-wallpaperengine
 
@@ -20,10 +20,16 @@ cd "$SRC"
 if ! git rev-parse -q --verify wpe >/dev/null; then
     git fetch -q origin
     git checkout -q -b wpe "$UPSTREAM_COMMIT"
-    git -c user.name=WPE -c user.email=wpe@localhost am -q "$PATCH"
 else
     git checkout -q wpe
 fi
+# Apply our patches that are not on the branch yet (matched by subject).
+for p in "$PATCHES"/0*.patch; do
+    subject=$(sed -n 's/^Subject: \[PATCH[^]]*\] //p' "$p" | head -1)
+    if ! git log --format=%s "$UPSTREAM_COMMIT"..wpe | grep -qF "$subject"; then
+        git -c user.name=WPE -c user.email=wpe@localhost am -q "$p"
+    fi
+done
 git submodule update --init --recursive -q
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \

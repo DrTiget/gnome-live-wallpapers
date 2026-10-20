@@ -16,7 +16,8 @@
 | `wpe-gallery` | без аргументов — GTK4/libadwaita GUI «Живые обои» (сетка превью, поиск/фильтр/сортировка, выбор монитора, свойства из project.json, настройки FPS/звука/каталогов, серые неподдерживаемые; [скриншот](docs/screenshots/gallery-grid.png)); с аргументами — CLI (`list/scan/add-dir/set/props/prop/volume`) |
 | `gnome-extension` | готово: окно рендерера → фон под всеми окнами (и в обзоре), скрыто из обзора/alt-tab/дока, курсор/клики с пустого рабочего стола (и поверх DING), пауза при maximized/fullscreen и блокировке |
 | сцены | этап 2 готов: linux-wallpaperengine (наш патч `--control-stdin`) в окне, найденном по PID, фоном; курсор/параллакс, пауза, свойства, FPS (`wpe-gallery fps 30`), звук выключен по умолчанию |
-| аудиоспектр, GUI-галерея | этап 3 |
+| аудиоспектр | этап 3 готов: web — захват монитора выхода по умолчанию (`pw-record`), FFT → 64+64 полосы, 30 Гц в `wallpaperRegisterAudioListener`, только пока видимые (не на паузе) обои зарегистрировали listener; сцены — захват самого linux-wallpaperengine (патч 0002: один поток, пауза = cork) |
+| GUI-галерея | этап 3 |
 
 ## Зависимости (Ubuntu 26.04)
 
@@ -55,11 +56,13 @@ WPE_GUI=1 scripts/nested-test.sh              # GUI галереи в nested-с�
 scripts/nested-test.sh                        # интеграционный тест в отдельной headless GNOME Shell
 WPE_SHELL_MODE=ubuntu WPE_MONITORS="1280x720 1024x768" scripts/nested-test.sh
 WPE_SCENES="beach 3582604159" scripts/nested-test.sh  # сцены: скриншоты, FPS, CPU/GPU, курсор, пауза, свойства
+WPE_AUDIO=1 WPE_AUDIO_SCENES=3479671230 scripts/nested-test.sh  # аудиоспектр: свой pipewire+wireplumber
+                         # (без устройств, null-sink по умолчанию), тестовый тон 220 Гц L / 3 кГц R
 ```
 
 `nested-test.sh` не трогает текущую сессию (свой D-Bus, GSettings в keyfile, свои `XDG_*`),
 скриншоты и логи — в `/tmp/wpe-nested/`. Тестовые обои: `examples/` (видео генерируется
-`examples/make-test-video.sh`), путь задаётся `WPE_TEST_DIR` (по умолчанию `~/wpe-test`; можно указать `examples/` после `make-test-video.sh`).
+`examples/make-test-video.sh`; `examples/web-audio` — визуализатор спектра), путь задаётся `WPE_TEST_DIR` (по умолчанию `~/wpe-test`; можно указать `examples/` после `make-test-video.sh`).
 
 ## Установка (без sudo)
 

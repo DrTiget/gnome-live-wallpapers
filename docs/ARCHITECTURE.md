@@ -40,7 +40,7 @@
     `applyGeneralProperties`, `setPaused`, `wallpaperRegisterAudioListener(cb)` (массив 128 float: 64 L + 64 R),
     `wallpaperRegisterPausedListener`, синтетические `mousemove/pointer*/mousedown/mouseup/click` по координатам от расширения.
   * **Scene**: подпроцесс linux-wallpaperengine (`scene.rs` — аргументы и протокол, `gtk_renderer.rs` — жизненный цикл), своего окна демон не создаёт. См. «Интеграция linux-wallpaperengine».
-  * **Audio** (этап 3): `pipewire-rs`, захват монитора default sink (`stream.capture.sink=true`), окно 1024 сэмплов, FFT (`rustfft`), 64 логарифмические полосы на канал, нормализация + сглаживание как в WE, 30 Гц → `window.__wpe.audio([...])`. Только для обоев с `supportsaudioprocessing` и только если не на паузе.
+  * **Audio** (этап 3, `crates/daemon/src/audio.rs`): подпроцесс `pw-record` (`stream.capture.sink=true` — монитор default sink, f32 стерео 24 кГц; без сборки биндингов libpipewire), окно Ханна 1024, свой radix-2 FFT, 64 логарифмические полосы на канал (40 Гц–11 кГц, −60…0 дБ → 0…1), быстрая атака / медленный спад, 30 Гц → `window.__wpe.audio([...])`; тишина после первого нулевого кадра не отправляется. Захват идёт, только пока есть видимая (не на паузе) web-страница, вызвавшая `wallpaperRegisterAudioListener` (шим сообщает об этом через `webkit.messageHandlers.wpe`); иначе `pw-record` завершён. Сцены захватывают звук сами (linux-wallpaperengine, pulse API, при `supportsaudioprocessing`), независимо от `--silent`.
 
 ### D-Bus API
 
@@ -107,7 +107,7 @@ Wayland-ограничение: клиент не может сам стать �
 * Свойства, громкость и FPS передаются только командной строкой → при изменении процесс перезапускается (старый получает `q`, через 3 с — SIGKILL, если не вышел). Упавший сам процесс снимается с монитора (лог `[scene] … exited`), на его месте — обычный фон GNOME.
 * Каталог: кроме Workshop сканируются встроенные проекты `<Steam>/common/wallpaper_engine/projects/defaultprojects` (`we_core::wallpaper_engine_dirs`).
 
-Дальше (не сделано): офскрин-вывод в DMA-BUF и показ в окне демона (`GdkDmabufTextureBuilder`) — убрал бы отдельные окна и перезапуски; изменение свойств без перезапуска через тот же канал; аудиоспектр для сцен.
+Дальше (не сделано): офскрин-вывод в DMA-BUF и показ в окне демона (`GdkDmabufTextureBuilder`) — убрал бы отдельные окна и перезапуски; изменение свойств без перезапуска через тот же канал.
 
 ## Этапы
 

@@ -23,7 +23,7 @@ use we_core::{Project, ProjectType};
 use webkit6::prelude::*;
 
 const SHIM: &str = include_str!("shim.js");
-use crate::{dbus, scene, webpath};
+use crate::{audio, dbus, scene, webpath};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use webkit6::soup;
@@ -71,6 +71,8 @@ struct Surface {
     window: Option<gtk4::ApplicationWindow>,
     wallpaper: String,
     content: Content,
+    /// Web page registered a wallpaperRegisterAudioListener.
+    audio: bool,
 }
 
 thread_local! {
@@ -85,6 +87,8 @@ thread_local! {
     /// Monitors currently paused by the extension.
     static PAUSED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     static SCHEME_REGISTERED: RefCell<bool> = const { RefCell::new(false) };
+    /// Running system audio capture (only while a visible web wallpaper listens).
+    static AUDIO: RefCell<Option<audio::Capture>> = const { RefCell::new(None) };
 }
 
 /// Windows are only created while the GNOME extension is active; without it
@@ -127,6 +131,7 @@ fn close(monitor: &str) {
             }
         }
     });
+    update_audio();
 }
 
 fn gdk_monitor(connector: &str) -> Option<gtk4::gdk::Monitor> {
@@ -161,7 +166,7 @@ fn show(monitor: String, project: Project) {
         let props = project.properties.to_user_properties();
         PROPS.with(|p| p.borrow_mut().insert(id.clone(), props.to_string()));
         if let Some(p) = start_scene(&monitor, &project.root, &props) {
-            SURFACES.with(|s| s.borrow_mut().insert(monitor, Surface { window: None, wallpaper: id, content: Content::Scene(p) }));
+            SURFACES.with(|s| s.borrow_mut().insert(monitor, Surface { window: None, wallpaper: id, content: Content::Scene(p), audio: false }));
         }
         return;
     }
@@ -195,6 +200,13 @@ fn show(monitor: String, project: Project) {
                     &[],
                     &[],
                 ));
+                ucm.register_script_message_handler("wpe", None);
+                let mon = monitor.clone();
+                ucm.connect_script_message_received(Some("wpe"), move |_, msg| {
+                    if msg.to_str() == "audio" {
+                        set_audio_listener(&mon, true);
+                    }
+                });
             }
             if let Some(settings) = webkit6::prelude::WebViewExt::settings(&view) {
                 settings.set_allow_file_access_from_file_urls(true);
@@ -206,6 +218,10 @@ fn show(monitor: String, project: Project) {
             }
             let (wallpaper, mon) = (id.clone(), monitor.clone());
             view.connect_load_changed(move |v, ev| {
+                if ev == webkit6::LoadEvent::Started {
+                    // New document: listeners are registered again by the page.
+                    set_audio_listener(&mon, false);
+                }
                 if ev == webkit6::LoadEvent::Finished {
                     if let Some(props) = PROPS.with(|p| p.borrow().get(&wallpaper).cloned()) {
                         web_js(v, &format!("window.__wpe.applyUserProperties({props});"));
@@ -223,7 +239,7 @@ fn show(monitor: String, project: Project) {
         _ => return,
     };
     window.present();
-    SURFACES.with(|s| s.borrow_mut().insert(monitor, Surface { window: Some(window), wallpaper: id, content }));
+    SURFACES.with(|s| s.borrow_mut().insert(monitor, Surface { window: Some(window), wallpaper: id, content, audio: false }));
 }
 
 fn start_scene(monitor: &str, root: &std::path::Path, props: &serde_json::Value) -> Option<SceneProc> {
@@ -294,13 +310,73 @@ fn restart_scenes(only: Option<&str>) {
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or(serde_json::Value::Null);
         match start_scene(&monitor, &root, &props) {
-            Some(p) => SURFACES.with(|s| s.borrow_mut().insert(monitor, Surface { window: None, wallpaper, content: Content::Scene(p) })),
+            Some(p) => SURFACES.with(|s| s.borrow_mut().insert(monitor, Surface { window: None, wallpaper, content: Content::Scene(p), audio: false })),
             None => {
                 dbus::set_renderer_pid(&monitor, None);
                 None
             }
         };
     }
+}
+
+fn set_audio_listener(monitor: &str, on: bool) {
+    SURFACES.with(|s| {
+        if let Some(surf) = s.borrow_mut().get_mut(monitor) {
+            surf.audio = on;
+        }
+    });
+    update_audio();
+}
+
+/// Web views that should get the spectrum now: listening and not paused.
+fn audio_views() -> Vec<webkit6::WebView> {
+    let paused = PAUSED.with(|p| p.borrow().clone());
+    SURFACES.with(|s| {
+        s.borrow()
+            .iter()
+            .filter(|(m, surf)| surf.audio && !paused.contains(*m))
+            .filter_map(|(_, surf)| match &surf.content {
+                Content::Web(v) => Some(v.clone()),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+/// Start the capture when some visible web wallpaper listens, stop it otherwise.
+/// Scenes capture sound themselves (linux-wallpaperengine, pulse API).
+fn update_audio() {
+    let wanted = !audio_views().is_empty();
+    AUDIO.with(|a| {
+        let mut a = a.borrow_mut();
+        if wanted == a.is_some() {
+            return;
+        }
+        if !wanted {
+            *a = None;
+            // Listeners keep their last values: let them fall to silence.
+            eprintln!("[audio] capture stopped");
+            return;
+        }
+        let deliver = |spectrum: Vec<f32>| {
+            glib::MainContext::default().invoke(move || {
+                if AUDIO.with(|a| a.borrow().is_none()) {
+                    return; // stale frame after stop
+                }
+                let js = format!("window.__wpe.audio({});", audio::js_array(&spectrum));
+                for v in audio_views() {
+                    web_js(&v, &js);
+                }
+            });
+        };
+        match audio::Capture::start(audio::command(), deliver) {
+            Ok(c) => {
+                eprintln!("[audio] capture started");
+                *a = Some(c);
+            }
+            Err(e) => eprintln!("[audio] cannot start pw-record: {e}"),
+        }
+    });
 }
 
 /// Call into the shim; a no-op while the page (and thus the shim) is not loaded yet.
@@ -410,7 +486,8 @@ fn handle_main(cmd: RenderCmd) {
             Some(Surface { content: Content::Scene(p), .. }) => p.send(&scene::pointer_lines(kind, x, y, button)),
             _ => {}
         }),
-        RenderCmd::Pause { monitor, paused } => SURFACES.with(|s| {
+        RenderCmd::Pause { monitor, paused } => {
+            SURFACES.with(|s| {
             PAUSED.with(|p| {
                 let mut p = p.borrow_mut();
                 if paused {
@@ -427,7 +504,9 @@ fn handle_main(cmd: RenderCmd) {
                     Content::Scene(p) => p.send(scene::pause_line(paused)),
                 }
             }
-        }),
+        });
+            update_audio();
+        }
         RenderCmd::Fps(fps) => {
             if FPS.replace(fps) != fps {
                 restart_scenes(None);

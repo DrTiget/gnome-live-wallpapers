@@ -1,3 +1,5 @@
+#[cfg_attr(not(feature = "gtk"), allow(dead_code))]
+mod audio;
 mod core;
 mod dbus;
 #[cfg_attr(not(feature = "gtk"), allow(dead_code))]

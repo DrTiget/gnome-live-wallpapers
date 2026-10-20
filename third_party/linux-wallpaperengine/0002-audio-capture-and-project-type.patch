@@ -1,0 +1,185 @@
+From 827671132351df3b2b1764140c6bbb1dd278543c Mon Sep 17 00:00:00 2001
+From: WPE <wpe@localhost>
+Date: Tue, 20 Oct 2026 20:05:10 +0200
+Subject: [PATCH] Audio processing: one capture stream, corked while paused;
+ infer missing project type
+
+- PulseAudioPlaybackRecorder re-created its record stream on every sink/source
+  event and only unref-ed the old one, which kept recording: after a few events
+  several streams ran at once. Re-take the stream only when the default sink
+  changes and disconnect the old one.
+- Cork the stream while rendering is paused (new PlaybackRecorder::setPaused),
+  so a paused wallpaper does not keep receiving and buffering samples.
+- Projects without "type" (official audiophile, techno) failed with
+  "Project type missing": infer it from the main file like Wallpaper Engine.
+---
+ .../Application/WallpaperApplication.cpp      |  4 ++-
+ .../Drivers/Recorders/PlaybackRecorder.h      |  2 ++
+ .../Recorders/PulseAudioPlaybackRecorder.cpp  | 35 ++++++++++++++++---
+ .../Recorders/PulseAudioPlaybackRecorder.h    |  6 ++++
+ .../Data/Parsers/ProjectParser.cpp            |  8 ++++-
+ 5 files changed, 48 insertions(+), 7 deletions(-)
+
+diff --git a/src/WallpaperEngine/Application/WallpaperApplication.cpp b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+index e306d9e..051363f 100644
+--- a/src/WallpaperEngine/Application/WallpaperApplication.cpp
++++ b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+@@ -351,7 +351,7 @@ bool WallpaperApplication::preflightWallpaper (const std::string& path) {
+ 	// avoid mutating state, just ensure project.json parses
+ 	auto container = this->setupAssetLocator (path);
+ 	const auto json = WallpaperEngine::Data::JSON::JSON::parse (container->readString ("project.json"));
+-	if (!json.contains ("type") || !json.contains ("file")) {
++	if (!json.contains ("file")) { // "type" may be missing, see ProjectParser
+ 	    sLog.error ("Preflight failed for ", path, ": missing required fields");
+ 	    return false;
+ 	}
+@@ -874,6 +874,7 @@ void WallpaperApplication::render () {
+ 	    return;
+ 	}
+ 	m_renderContext->setPause (false);
++	m_audioDriver->getRecorder ().setPaused (false);
+ 
+ 	// account for paused duration in playlist timers
+ 	const auto pausedNow = std::chrono::steady_clock::now ();
+@@ -945,6 +946,7 @@ void WallpaperApplication::render () {
+ 	    this->m_pauseStart = std::chrono::steady_clock::now ();
+ 
+ 	    m_renderContext->setPause (true);
++	    m_audioDriver->getRecorder ().setPaused (true);
+ 	    return;
+ 	}
+     }
+diff --git a/src/WallpaperEngine/Audio/Drivers/Recorders/PlaybackRecorder.h b/src/WallpaperEngine/Audio/Drivers/Recorders/PlaybackRecorder.h
+index d46b83e..06bcdc0 100644
+--- a/src/WallpaperEngine/Audio/Drivers/Recorders/PlaybackRecorder.h
++++ b/src/WallpaperEngine/Audio/Drivers/Recorders/PlaybackRecorder.h
+@@ -6,6 +6,8 @@ public:
+     virtual ~PlaybackRecorder () = default;
+ 
+     virtual void update ();
++    /** Stop/resume capturing while rendering is paused (no-op without a capture stream). */
++    virtual void setPaused (bool paused) { }
+ 
+     float audio16[16] = { 0 };
+     float audio32[32] = { 0 };
+diff --git a/src/WallpaperEngine/Audio/Drivers/Recorders/PulseAudioPlaybackRecorder.cpp b/src/WallpaperEngine/Audio/Drivers/Recorders/PulseAudioPlaybackRecorder.cpp
+index 5831d4a..ccabc8b 100644
+--- a/src/WallpaperEngine/Audio/Drivers/Recorders/PulseAudioPlaybackRecorder.cpp
++++ b/src/WallpaperEngine/Audio/Drivers/Recorders/PulseAudioPlaybackRecorder.cpp
+@@ -107,18 +107,28 @@ void pa_server_info_cb (pa_context* ctx, const pa_server_info* info, void* userd
+     spec.rate = 44100;
+     spec.channels = 1;
+ 
++    std::string monitor_name (info->default_sink_name ? info->default_sink_name : "");
++    monitor_name += ".monitor";
++
++    // every sink/source event lands here: only re-take the stream when the default sink changed
++    // (or the stream died); the old one must be disconnected, unref alone keeps it recording
+     if (recorder->captureStream) {
++	const auto state = pa_stream_get_state (recorder->captureStream);
++	if (recorder->monitorName == monitor_name && state != PA_STREAM_FAILED && state != PA_STREAM_TERMINATED) {
++	    return;
++	}
++	pa_stream_set_read_callback (recorder->captureStream, nullptr, nullptr);
++	pa_stream_set_state_callback (recorder->captureStream, nullptr, nullptr);
++	pa_stream_disconnect (recorder->captureStream);
+ 	pa_stream_unref (recorder->captureStream);
+     }
+ 
++    recorder->monitorName = monitor_name;
+     recorder->captureStream = pa_stream_new (ctx, "output monitor", &spec, nullptr);
+ 
+     pa_stream_set_state_callback (recorder->captureStream, &pa_stream_notify_cb, userdata);
+     pa_stream_set_read_callback (recorder->captureStream, &pa_stream_read_cb, userdata);
+ 
+-    std::string monitor_name (info->default_sink_name);
+-    monitor_name += ".monitor";
+-
+     // setup latency
+     pa_buffer_attr attr {};
+ 
+@@ -127,8 +137,11 @@ void pa_server_info_cb (pa_context* ctx, const pa_server_info* info, void* userd
+     attr.fragsize = bytesPerSec * 10 / 100;
+     attr.maxlength = attr.fragsize + bytesPerSec * 750 / 100;
+ 
+-    if (pa_stream_connect_record (recorder->captureStream, monitor_name.c_str (), &attr, PA_STREAM_ADJUST_LATENCY)
+-	!= 0) {
++    const auto flags = static_cast<pa_stream_flags_t> (
++	PA_STREAM_ADJUST_LATENCY | (recorder->paused ? PA_STREAM_START_CORKED : PA_STREAM_NOFLAGS)
++    );
++
++    if (pa_stream_connect_record (recorder->captureStream, monitor_name.c_str (), &attr, flags) != 0) {
+ 	sLog.error ("Failed to connect to input for recording");
+     }
+ }
+@@ -211,6 +224,18 @@ PulseAudioPlaybackRecorder::~PulseAudioPlaybackRecorder () {
+     pa_mainloop_free (this->m_mainloop);
+ }
+ 
++void PulseAudioPlaybackRecorder::setPaused (bool paused) {
++    // cork the monitor stream so the sound server stops delivering (and we stop waking up for) samples
++    this->m_captureData.paused = paused;
++    if (this->m_captureData.captureStream) {
++	pa_operation* o = pa_stream_cork (this->m_captureData.captureStream, paused ? 1 : 0, nullptr, nullptr);
++	if (o) {
++	    pa_operation_unref (o);
++	}
++	pa_mainloop_iterate (this->m_mainloop, 0, nullptr);
++    }
++}
++
+ void PulseAudioPlaybackRecorder::update () {
+     pa_mainloop_iterate (this->m_mainloop, 0, nullptr);
+ 
+diff --git a/src/WallpaperEngine/Audio/Drivers/Recorders/PulseAudioPlaybackRecorder.h b/src/WallpaperEngine/Audio/Drivers/Recorders/PulseAudioPlaybackRecorder.h
+index ac6c034..1155125 100644
+--- a/src/WallpaperEngine/Audio/Drivers/Recorders/PulseAudioPlaybackRecorder.h
++++ b/src/WallpaperEngine/Audio/Drivers/Recorders/PulseAudioPlaybackRecorder.h
+@@ -3,6 +3,7 @@
+ #include "PlaybackRecorder.h"
+ #include "kiss_fftr.h"
+ #include <pulse/pulseaudio.h>
++#include <string>
+ 
+ #define WAVE_BUFFER_SIZE 1024
+ 
+@@ -21,12 +22,17 @@ public:
+ 	size_t currentWritePointer;
+ 	bool fullFrameReady;
+ 	pa_stream* captureStream;
++	/** Source the stream records from (default sink monitor) */
++	std::string monitorName;
++	/** Rendering paused: (new) streams stay corked */
++	bool paused;
+     };
+ 
+     PulseAudioPlaybackRecorder ();
+     ~PulseAudioPlaybackRecorder () override;
+ 
+     void update () override;
++    void setPaused (bool paused) override;
+ 
+ private:
+     pa_mainloop* m_mainloop;
+diff --git a/src/WallpaperEngine/Data/Parsers/ProjectParser.cpp b/src/WallpaperEngine/Data/Parsers/ProjectParser.cpp
+index 02de380..5565f65 100644
+--- a/src/WallpaperEngine/Data/Parsers/ProjectParser.cpp
++++ b/src/WallpaperEngine/Data/Parsers/ProjectParser.cpp
+@@ -17,7 +17,13 @@ ProjectUniquePtr ProjectParser::parse (const JSON& data, AssetLocatorUniquePtr c
+     const auto general = data.optional ("general");
+     const auto workshopId = data.optional ("workshopid");
+     auto actualWorkshopId = std::to_string (--backgroundId);
+-    auto type = data.require<std::string> ("type", "Project type missing");
++    // some official projects (audiophile, techno) have no "type": infer it from the main file like WE does
++    auto type = data.optional<std::string> ("type", "");
++    if (type.empty ()) {
++	const auto file = data.optional<std::string> ("file", "");
++	const auto ext = file.substr (std::min (file.size (), file.rfind (".") + 1));
++	type = ext == "json" ? "scene" : (ext == "html" || ext == "htm") ? "web" : "video";
++    }
+ 
+     if (workshopId.has_value ()) {
+ 	if (workshopId->is_number ()) {
+-- 
+2.53.0
+

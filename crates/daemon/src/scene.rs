@@ -63,6 +63,9 @@ pub fn command_args(root: &Path, user_properties: &Value, o: &SceneOptions) -> V
         "--fps".into(),
         o.fps.to_string().into(),
     ];
+    // --silent mutes only the wallpaper's own sounds: linux-wallpaperengine
+    // still captures system audio for projects with supportsaudioprocessing
+    // (our patch 0002 corks that capture while paused).
     if o.muted || o.volume <= 0.0 {
         a.push("--silent".into());
     } else {

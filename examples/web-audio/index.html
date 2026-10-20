@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>WPE audio visualizer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05070c; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #info { position: absolute; left: 16px; top: 12px; color: #9ab; font: 16px monospace; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info">waiting for audio…</div>
+<script>
+// 128 values: 64 bands of the left channel (drawn left half), 64 of the right.
+const canvas = document.getElementById("c"), ctx = canvas.getContext("2d"), info = document.getElementById("info");
+let color = [0.2, 0.8, 1], last = new Array(128).fill(0), frames = 0, perSecond = 0;
+function resize() { canvas.width = innerWidth; canvas.height = innerHeight; }
+addEventListener("resize", resize); resize();
+const peak = (a) => a.reduce((best, v, i) => (v > a[best] ? i : best), 0);
+window.wallpaperRegisterAudioListener((a) => { last = a; frames++; perSecond++; });
+window.wallpaperPropertyListener = {
+  applyUserProperties(p) { if (p.schemecolor) color = p.schemecolor.value.split(" ").map(Number); },
+};
+setInterval(() => {
+  const l = last.slice(0, 64), r = last.slice(64);
+  const msg = `frames=${frames} rate=${perSecond}/s peakL=${peak(l)}:${l[peak(l)].toFixed(2)} peakR=${peak(r)}:${r[peak(r)].toFixed(2)}`;
+  info.textContent = msg; console.log("[wpe-audio] " + msg); perSecond = 0;
+}, 1000);
+function draw() {
+  const w = canvas.width, h = canvas.height, bw = w / 128;
+  ctx.fillStyle = "#05070c"; ctx.fillRect(0, 0, w, h);
+  const [r, g, b] = color.map((x) => Math.round(x * 255));
+  for (let i = 0; i < 128; i++) {
+    const v = last[i], bh = v * h * 0.85;
+    ctx.fillStyle = i < 64 ? `rgb(${r},${g},${b})` : `rgb(${b},${r},${g})`;
+    ctx.fillRect(i * bw + 1, h - bh, bw - 2, bh);
+  }
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

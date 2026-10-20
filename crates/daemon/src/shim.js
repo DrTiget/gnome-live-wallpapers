@@ -29,7 +29,11 @@
     }
   }
 
-  window.wallpaperRegisterAudioListener = function (cb) { audioListeners.push(cb); };
+  window.wallpaperRegisterAudioListener = function (cb) {
+    audioListeners.push(cb);
+    // Tell the daemon to start capturing (it only does so for pages that listen).
+    try { window.webkit.messageHandlers.wpe.postMessage("audio"); } catch (_) { /* not in WebKitGTK */ }
+  };
   window.wallpaperRegisterPausedListener = function (cb) { pausedListeners.push(cb); };
   window.wallpaperRequestRandomFileForProperty = function (_key, cb) { /* stage 3 */ };
 

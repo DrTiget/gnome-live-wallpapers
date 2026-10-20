@@ -18,6 +18,39 @@ if [ -z "${WPE_NESTED_INNER:-}" ]; then
     unset DBUS_SESSION_BUS_ADDRESS
     exec dbus-run-session -- "$0" "$@"
 fi
+# WPE_AUDIO=1 — audio spectrum test on a private PipeWire (own pipewire,
+# pipewire-pulse and wireplumber with device monitors disabled, a null sink as
+# the default output): the user's real sound devices and volume are untouched.
+if [ -n "${WPE_AUDIO:-}" ]; then
+    export PIPEWIRE_RUNTIME_DIR=$OUT/pw PULSE_RUNTIME_PATH=$OUT/pw/pulse WPE_DEBUG=1
+    mkdir -p "$PIPEWIRE_RUNTIME_DIR" "$XDG_CONFIG_HOME/wireplumber/wireplumber.conf.d"
+    cat > "$XDG_CONFIG_HOME/wireplumber/wireplumber.conf.d/90-wpe-test.conf" <<'C'
+wireplumber.profiles = {
+  main = {
+    monitor.alsa = disabled
+    monitor.alsa-midi = disabled
+    monitor.bluez = disabled
+    monitor.bluez.seat-monitoring = disabled
+    monitor.v4l2 = disabled
+    monitor.libcamera = disabled
+  }
+}
+C
+    pipewire > "$OUT/pipewire.log" 2>&1 &
+    sleep 1
+    wireplumber > "$OUT/wireplumber.log" 2>&1 &
+    pipewire-pulse > "$OUT/pipewire-pulse.log" 2>&1 &
+    sleep 1.5
+    pw-cli create-node adapter '{ factory.name=support.null-audio-sink node.name=wpe-null media.class=Audio/Sink audio.position=[FL FR] object.linger=true }' >/dev/null
+    sleep 1
+    # Test tone: 220 Hz left, 3 kHz right.
+    python3 - "$OUT/tone.wav" <<'PY'
+import math, struct, sys, wave
+w = wave.open(sys.argv[1], "wb"); w.setnchannels(2); w.setsampwidth(2); w.setframerate(48000)
+w.writeframes(b"".join(struct.pack("<hh", int(12000 * math.sin(2 * math.pi * 220 * i / 48000)),
+                                   int(12000 * math.sin(2 * math.pi * 3000 * i / 48000))) for i in range(48000 * 4)))
+PY
+fi
 # Desktop Icons NG needs the real XDG user dirs (~/Desktop location).
 [ -f "$HOME/.config/user-dirs.dirs" ] && mkdir -p "$XDG_CONFIG_HOME" && cp "$HOME/.config/user-dirs.dirs" "$XDG_CONFIG_HOME/"
 [ "${WPE_SHELL_MODE:-}" = ubuntu ] && export XDG_CURRENT_DESKTOP=ubuntu:GNOME XDG_SESSION_DESKTOP=ubuntu
@@ -100,6 +133,44 @@ fi
     done
     grep -E "^\[scene\]" "$OUT/daemon.log"
     kill $DAEMON_PID; sleep 1; kill $SHELL_PID; wait
+    exit 0
+fi
+
+if [ -n "${WPE_AUDIO:-}" ]; then
+    spectrum_pids() { pgrep -f "node.name=wpe-audio-spectrum" | tr '\n' ' '; }
+    # Recording streams in the private PipeWire graph: "name:state".
+    capture_streams() {
+        pw-dump | python3 -c 'import json,sys; print(" ".join(o["info"]["props"].get("application.name","?")+":"+o["info"]["state"] for o in json.load(sys.stdin) if o.get("type","").endswith(":Node") and o["info"]["props"].get("media.class")=="Stream/Input/Audio") or "none")'
+    }
+    tone() { ( for _ in $(seq "$1"); do pw-play "$OUT/tone.wav"; done ) & }
+    $G set '*' web-audio; sleep 5
+    echo "audio: capture before any sound: pids [$(spectrum_pids)]"
+    tone 3; TONE=$!; sleep 4
+    python3 scripts/rd-probe.py "$OUT/audio-" shot:1-tone
+    echo "audio: capture streams: $(capture_streams)"
+    echo "audio: CPU while playing (daemon with WebKit, then pw-record alone):"
+    python3 scripts/proc-usage.py $DAEMON_PID 4; python3 scripts/proc-usage.py "$(spectrum_pids | cut -d' ' -f1)" 4
+    wait $TONE; sleep 3
+    python3 scripts/rd-probe.py "$OUT/audio-" shot:2-silence
+    echo "audio: CPU in silence (no spectrum sent, page still animating):"; python3 scripts/proc-usage.py $DAEMON_PID 4
+    GDK_BACKEND=wayland python3 scripts/maximized-window.py 5 &
+    MAXW=$!; sleep 2.5; echo "audio: paused (maximized window): capture pids [$(spectrum_pids)]"
+    wait $MAXW; sleep 1.5; echo "audio: resumed: capture pids [$(spectrum_pids)]"
+    $G set '*' video-test; sleep 4
+    echo "audio: video-test (no listener): capture pids [$(spectrum_pids)]"
+    for ID in ${WPE_AUDIO_SCENES:-}; do
+        $G set '*' "$ID"; sleep "${WPE_SCENE_WAIT:-12}"
+        python3 scripts/rd-probe.py "$OUT/audio-scene-$ID-" shot:1-silence
+        tone 3; TONE=$!; sleep 3
+        python3 scripts/rd-probe.py "$OUT/audio-scene-$ID-" shot:2-tone sleep:0.7 shot:3-tone
+        wait $TONE
+        echo "audio: scene $ID capture streams: $(capture_streams)"
+        GDK_BACKEND=wayland python3 scripts/maximized-window.py 5 &
+        MAXW=$!; sleep 2.5; echo "audio: scene $ID paused: capture streams: $(capture_streams)"
+        wait $MAXW; sleep 1.5; echo "audio: scene $ID resumed: capture streams: $(capture_streams)"
+    done
+    echo "--- log:"; grep -E "^\[audio\]|\[wpe-audio\]|^\[scene\]" "$OUT/daemon.log" | sed 's/^.*\[wpe-audio\]/[wpe-audio]/'
+    kill $DAEMON_PID; sleep 1; kill $SHELL_PID; pkill -P $$; wait
     exit 0
 fi
 
