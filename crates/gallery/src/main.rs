@@ -4,7 +4,7 @@
 
 use zbus::blocking::{Connection, Proxy};
 
-const USAGE: &str = "usage: wpe-gallery list | scan [-v] <dir> | add-dir <dir> | volume <0..1> <muted:true|false> | set <monitor|*> <id> | props <id> | prop <id> <key> <json>";
+const USAGE: &str = "usage: wpe-gallery list | scan [-v] <dir> | add-dir <dir> | volume <0..1> <muted:true|false> | fps [1..240] | set <monitor|*> <id> | props <id> | prop <id> <key> <json>";
 
 fn proxy(conn: &Connection) -> zbus::Result<Proxy<'_>> {
     Proxy::new(conn, "io.github.wpe.Daemon", "/io/github/wpe/Daemon", "io.github.wpe.Daemon1")
@@ -67,6 +67,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ["volume", vol, muted] => {
             let conn = Connection::session()?;
             proxy(&conn)?.call::<_, _, ()>("SetVolume", &(vol.parse::<f64>()?, muted.parse::<bool>()?))?;
+        }
+        ["fps"] => {
+            let conn = Connection::session()?;
+            let fps: u32 = proxy(&conn)?.call("GetFps", &())?;
+            println!("{fps}");
+        }
+        ["fps", n] => {
+            let conn = Connection::session()?;
+            proxy(&conn)?.call::<_, _, ()>("SetFps", &(n.parse::<u32>()?,))?;
         }
         ["set", mon, id] => {
             let conn = Connection::session()?;

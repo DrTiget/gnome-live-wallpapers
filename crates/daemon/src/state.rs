@@ -23,6 +23,9 @@ pub struct State {
     /// Wallpapers are silent until the user unmutes them.
     #[serde(default = "default_muted")]
     pub muted: bool,
+    /// Frame rate limit for scene wallpapers (linux-wallpaperengine `--fps`).
+    #[serde(default = "default_fps")]
+    pub fps: u32,
 }
 
 fn default_volume() -> f64 {
@@ -31,6 +34,12 @@ fn default_volume() -> f64 {
 
 fn default_muted() -> bool {
     true
+}
+
+pub const DEFAULT_FPS: u32 = 30;
+
+fn default_fps() -> u32 {
+    DEFAULT_FPS
 }
 
 pub fn default_path() -> PathBuf {
@@ -46,7 +55,7 @@ impl State {
         std::fs::read(path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_else(|| State { volume: default_volume(), muted: default_muted(), ..Default::default() })
+            .unwrap_or_else(|| State { volume: default_volume(), muted: default_muted(), fps: default_fps(), ..Default::default() })
     }
 
     /// Atomic write (tmp + rename).
@@ -75,6 +84,7 @@ mod tests {
         let path = dir.path().join("x/state.json");
         assert_eq!(State::load(&path).volume, 0.5);
         assert!(State::load(&path).muted);
+        assert_eq!(State::load(&path).fps, 30);
         let mut s = State::load(&path);
         s.assignments.insert("*".into(), "1".into());
         s.assignments.insert("DP-1".into(), "2".into());

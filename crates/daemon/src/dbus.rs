@@ -2,12 +2,39 @@
 //! See docs/ARCHITECTURE.md for the full contract.
 
 use crate::core::{Core, PointerKind, RenderCmd};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, OnceLock};
 use zbus::{fdo, interface, object_server::SignalEmitter};
 
 pub const BUS_NAME: &str = "io.github.wpe.Daemon";
 pub const OBJECT_PATH: &str = "/io/github/wpe/Daemon";
+const INTERFACE: &str = "io.github.wpe.Daemon1";
+
+/// Monitor connector -> PID of the process whose window renders it (scenes:
+/// linux-wallpaperengine). The extension matches those windows by PID.
+pub static RENDERER_PIDS: Mutex<BTreeMap<String, u32>> = Mutex::new(BTreeMap::new());
+static CONNECTION: OnceLock<zbus::blocking::Connection> = OnceLock::new();
+
+pub fn set_connection(conn: zbus::blocking::Connection) {
+    let _ = CONNECTION.set(conn);
+}
+
+#[cfg_attr(not(feature = "gtk"), allow(dead_code))]
+pub fn set_renderer_pid(monitor: &str, pid: Option<u32>) {
+    {
+        let mut pids = RENDERER_PIDS.lock().unwrap();
+        let changed = match pid {
+            Some(pid) => pids.insert(monitor.into(), pid) != Some(pid),
+            None => pids.remove(monitor).is_some(),
+        };
+        if !changed {
+            return;
+        }
+    }
+    if let Some(conn) = CONNECTION.get() {
+        let _ = conn.emit_signal(None::<&str>, OBJECT_PATH, INTERFACE, "RendererPidsChanged", &());
+    }
+}
 
 pub struct Service {
     pub core: Arc<Mutex<Core>>,
@@ -96,6 +123,21 @@ impl Service {
         c.apply_all();
     }
 
+    /// Frame rate limit for scene wallpapers (1..240, default 30).
+    fn set_fps(&self, fps: u32) -> fdo::Result<()> {
+        self.core.lock().unwrap().set_fps(fps).map_err(err)
+    }
+
+    fn get_fps(&self) -> u32 {
+        self.core.lock().unwrap().state.fps
+    }
+
+    /// Monitor connector -> PID of the process rendering it in its own window
+    /// (scene wallpapers). Changes are announced by RendererPidsChanged.
+    fn get_renderer_pids(&self) -> HashMap<String, u32> {
+        RENDERER_PIDS.lock().unwrap().clone().into_iter().collect()
+    }
+
     #[zbus(property)]
     fn version(&self) -> String {
         env!("CARGO_PKG_VERSION").into()
@@ -107,4 +149,6 @@ impl Service {
     async fn assignments_changed(em: &SignalEmitter<'_>) -> zbus::Result<()>;
     #[zbus(signal)]
     async fn properties_changed(em: &SignalEmitter<'_>, id: &str) -> zbus::Result<()>;
+    #[zbus(signal)]
+    async fn renderer_pids_changed(em: &SignalEmitter<'_>) -> zbus::Result<()>;
 }

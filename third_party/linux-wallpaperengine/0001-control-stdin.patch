@@ -1,0 +1,296 @@
+From 73169963de8e592c92bd8191adb7b9d1bed129ec Mon Sep 17 00:00:00 2001
+From: WPE <wpe@localhost>
+Date: Tue, 20 Oct 2026 19:12:07 +0200
+Subject: [PATCH] Add --control-stdin: pointer, buttons and pause from the
+ host; make GLUT optional
+
+Hosts that show the window where it never gets real input (a GNOME Shell
+extension cloning it into the desktop background) forward the pointer and
+pause state over stdin, one command per line:
+  m <x> <y>, b <l|r> <0|1>, p <0|1>, q. EOF on stdin quits as well.
+
+GLUT is only linked, never used, so it is no longer required.
+---
+ CMakeLists.txt                                |  4 +-
+ .../Application/ApplicationContext.cpp        |  5 ++
+ .../Application/WallpaperApplication.cpp      | 18 ++++-
+ .../Application/WallpaperApplication.h        |  2 +
+ .../Input/Drivers/GLFWMouseInput.cpp          | 21 +++--
+ src/WallpaperEngine/Input/ExternalControl.cpp | 79 +++++++++++++++++++
+ src/WallpaperEngine/Input/ExternalControl.h   | 28 +++++++
+ 7 files changed, 147 insertions(+), 10 deletions(-)
+ create mode 100644 src/WallpaperEngine/Input/ExternalControl.cpp
+ create mode 100644 src/WallpaperEngine/Input/ExternalControl.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 11565a1..4141453 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -29,7 +29,7 @@ find_package(OpenGL REQUIRED)
+ find_package(GLEW REQUIRED)
+ 
+ find_package(DBus REQUIRED)
+-find_package(GLUT REQUIRED)
++find_package(GLUT) # only linked, never used in sources
+ find_package(ZLIB REQUIRED)
+ find_package(SDL2 REQUIRED)
+ find_package(MPV REQUIRED)
+@@ -351,6 +351,8 @@ set(COMMON_SOURCES
+     src/WallpaperEngine/Input/InputContext.cpp
+     src/WallpaperEngine/Input/InputContext.h
+     src/WallpaperEngine/Input/MouseInput.h
++    src/WallpaperEngine/Input/ExternalControl.cpp
++    src/WallpaperEngine/Input/ExternalControl.h
+     src/WallpaperEngine/Input/Drivers/GLFWMouseInput.cpp
+     src/WallpaperEngine/Input/Drivers/GLFWMouseInput.h
+ 
+diff --git a/src/WallpaperEngine/Application/ApplicationContext.cpp b/src/WallpaperEngine/Application/ApplicationContext.cpp
+index 510ec95..183a426 100644
+--- a/src/WallpaperEngine/Application/ApplicationContext.cpp
++++ b/src/WallpaperEngine/Application/ApplicationContext.cpp
+@@ -1,4 +1,5 @@
+ #include "ApplicationContext.h"
++#include "WallpaperEngine/Input/ExternalControl.h"
+ 
+ #include "Steam/FileSystem/FileSystem.h"
+ #include "WallpaperEngine/Data/JSON.h"
+@@ -570,6 +571,10 @@ void ApplicationContext::loadSettingsFromArgv () {
+ 	.help ("Disables mouse interaction with the backgrounds")
+ 	.flag ()
+ 	.action ([this] (const std::string& value) -> void { this->settings.mouse.enabled = false; });
++    configurationGroup.add_argument ("--control-stdin")
++	.help ("Read pointer position, buttons and pause state from stdin (for hosts embedding the window)")
++	.flag ()
++	.action ([this] (const std::string& value) -> void { WallpaperEngine::Input::ExternalControl::start (); });
+     configurationGroup.add_argument ("--disable-parallax")
+ 	.help ("Disables parallax effect for the backgrounds")
+ 	.flag ()
+diff --git a/src/WallpaperEngine/Application/WallpaperApplication.cpp b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+index c9107af..e306d9e 100644
+--- a/src/WallpaperEngine/Application/WallpaperApplication.cpp
++++ b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+@@ -1,4 +1,5 @@
+ #include "WallpaperApplication.h"
++#include "WallpaperEngine/Input/ExternalControl.h"
+ 
+ #include "Steam/FileSystem/FileSystem.h"
+ #include "WallpaperEngine/Application/ApplicationState.h"
+@@ -31,6 +32,7 @@
+ #include <thread>
+ 
+ #define FULLSCREEN_CHECK_WAIT_TIME 250
++#define EXTERNAL_PAUSE_WAIT_TIME 50000
+ 
+ float g_Time;
+ float g_TimeLast;
+@@ -852,13 +854,23 @@ void WallpaperApplication::setup () {
+ #endif /* DEMOMODE */
+ }
+ 
++bool WallpaperApplication::shouldPause () const {
++    return WallpaperEngine::Input::ExternalControl::paused () || this->m_fullScreenDetector->anythingFullscreen ();
++}
++
+ void WallpaperApplication::render () {
+     static time_t seconds;
+     static struct tm* timeinfo;
+ 
++    if (WallpaperEngine::Input::ExternalControl::quitRequested ()) {
++	sLog.out ("Stop requested over the control channel");
++	this->m_context.state.general.keepRunning = false;
++	return;
++    }
++
+     if (this->m_isPaused) {
+-	usleep (FULLSCREEN_CHECK_WAIT_TIME);
+-	if (this->m_fullScreenDetector->anythingFullscreen () && this->m_context.state.general.keepRunning) {
++	usleep (WallpaperEngine::Input::ExternalControl::paused () ? EXTERNAL_PAUSE_WAIT_TIME : FULLSCREEN_CHECK_WAIT_TIME);
++	if (this->shouldPause () && this->m_context.state.general.keepRunning) {
+ 	    return;
+ 	}
+ 	m_renderContext->setPause (false);
+@@ -928,7 +940,7 @@ void WallpaperApplication::render () {
+ 	}
+ #endif /* DEMOMODE */
+ 	// check for fullscreen windows and wait until there's none fullscreen
+-	if (this->m_fullScreenDetector->anythingFullscreen () && this->m_context.state.general.keepRunning) {
++	if (this->shouldPause () && this->m_context.state.general.keepRunning) {
+ 	    this->m_isPaused = true;
+ 	    this->m_pauseStart = std::chrono::steady_clock::now ();
+ 
+diff --git a/src/WallpaperEngine/Application/WallpaperApplication.h b/src/WallpaperEngine/Application/WallpaperApplication.h
+index 1d1302a..26689ea 100644
+--- a/src/WallpaperEngine/Application/WallpaperApplication.h
++++ b/src/WallpaperEngine/Application/WallpaperApplication.h
+@@ -177,6 +177,8 @@ private:
+     std::unique_ptr<WallpaperEngine::WebBrowser::WebBrowserContext> m_browserContext = nullptr;
+     std::unique_ptr<WallpaperEngine::Media::MediaSource> m_mediaSource = nullptr;
+     std::mt19937 m_playlistRng { std::random_device {}() };
++    /** Paused by a fullscreen window or by the host over --control-stdin */
++    [[nodiscard]] bool shouldPause () const;
+     bool m_isPaused = false;
+     bool m_screenShotTaken = false;
+     uint32_t m_nextFrameScreenshot = 0;
+diff --git a/src/WallpaperEngine/Input/Drivers/GLFWMouseInput.cpp b/src/WallpaperEngine/Input/Drivers/GLFWMouseInput.cpp
+index 8ddce13..d2b60b3 100644
+--- a/src/WallpaperEngine/Input/Drivers/GLFWMouseInput.cpp
++++ b/src/WallpaperEngine/Input/Drivers/GLFWMouseInput.cpp
+@@ -1,6 +1,8 @@
+ #include "GLFWMouseInput.h"
+ #include <glm/common.hpp>
+ 
++#include "WallpaperEngine/Input/ExternalControl.h"
++
+ #include "WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.h"
+ 
+ using namespace WallpaperEngine::Input::Drivers;
+@@ -13,14 +15,21 @@ void GLFWMouseInput::update () {
+ 	return;
+     }
+ 
+-    const int leftClickState = glfwGetMouseButton (this->m_driver.getWindow (), GLFW_MOUSE_BUTTON_LEFT);
+-    const int rightClickState = glfwGetMouseButton (this->m_driver.getWindow (), GLFW_MOUSE_BUTTON_RIGHT);
++    if (ExternalControl::enabled ()) {
++	// the host forwards pointer state, the window itself never gets input
++	this->m_leftClick = ExternalControl::leftDown () ? MouseClickStatus::Clicked : MouseClickStatus::Released;
++	this->m_rightClick = ExternalControl::rightDown () ? MouseClickStatus::Clicked : MouseClickStatus::Released;
++	this->m_mousePosition = ExternalControl::position ();
++    } else {
++	const int leftClickState = glfwGetMouseButton (this->m_driver.getWindow (), GLFW_MOUSE_BUTTON_LEFT);
++	const int rightClickState = glfwGetMouseButton (this->m_driver.getWindow (), GLFW_MOUSE_BUTTON_RIGHT);
+ 
+-    this->m_leftClick = leftClickState == GLFW_RELEASE ? MouseClickStatus::Released : MouseClickStatus::Clicked;
+-    this->m_rightClick = rightClickState == GLFW_RELEASE ? MouseClickStatus::Released : MouseClickStatus::Clicked;
++	this->m_leftClick = leftClickState == GLFW_RELEASE ? MouseClickStatus::Released : MouseClickStatus::Clicked;
++	this->m_rightClick = rightClickState == GLFW_RELEASE ? MouseClickStatus::Released : MouseClickStatus::Clicked;
+ 
+-    // update current mouse position
+-    glfwGetCursorPos (this->m_driver.getWindow (), &this->m_mousePosition.x, &this->m_mousePosition.y);
++	// update current mouse position
++	glfwGetCursorPos (this->m_driver.getWindow (), &this->m_mousePosition.x, &this->m_mousePosition.y);
++    }
+ 
+     // Convert from GLFW coordinate system (Y=0 at top) to OpenGL coordinate system (Y=0 at bottom)
+     const glm::ivec2 framebufferSize = this->m_driver.getFramebufferSize ();
+diff --git a/src/WallpaperEngine/Input/ExternalControl.cpp b/src/WallpaperEngine/Input/ExternalControl.cpp
+new file mode 100644
+index 0000000..60170c6
+--- /dev/null
++++ b/src/WallpaperEngine/Input/ExternalControl.cpp
+@@ -0,0 +1,79 @@
++#include "ExternalControl.h"
++
++#include <atomic>
++#include <iostream>
++#include <sstream>
++#include <string>
++#include <thread>
++
++using namespace WallpaperEngine::Input;
++
++namespace {
++std::atomic<bool> s_enabled = false;
++std::atomic<bool> s_paused = false;
++std::atomic<bool> s_quit = false;
++std::atomic<double> s_x = 0.0;
++std::atomic<double> s_y = 0.0;
++std::atomic<bool> s_left = false;
++std::atomic<bool> s_right = false;
++
++void readLoop () {
++    std::string line;
++
++    while (std::getline (std::cin, line)) {
++	std::istringstream in (line);
++	char cmd = 0;
++	in >> cmd;
++
++	switch (cmd) {
++	    case 'm': {
++		double x, y;
++		if (in >> x >> y) {
++		    s_x = x;
++		    s_y = y;
++		}
++		break;
++	    }
++	    case 'b': {
++		char which = 0;
++		int down = 0;
++		if (in >> which >> down) {
++		    (which == 'r' ? s_right : s_left) = down != 0;
++		}
++		break;
++	    }
++	    case 'p': {
++		int paused = 0;
++		if (in >> paused) {
++		    s_paused = paused != 0;
++		}
++		break;
++	    }
++	    case 'q': s_quit = true; return;
++	    default: break;
++	}
++    }
++
++    s_quit = true;
++}
++} // namespace
++
++void ExternalControl::start () {
++    if (s_enabled.exchange (true)) {
++	return;
++    }
++
++    std::thread (readLoop).detach ();
++}
++
++bool ExternalControl::enabled () { return s_enabled; }
++
++bool ExternalControl::paused () { return s_paused; }
++
++bool ExternalControl::quitRequested () { return s_quit; }
++
++glm::dvec2 ExternalControl::position () { return { s_x.load (), s_y.load () }; }
++
++bool ExternalControl::leftDown () { return s_left; }
++
++bool ExternalControl::rightDown () { return s_right; }
+diff --git a/src/WallpaperEngine/Input/ExternalControl.h b/src/WallpaperEngine/Input/ExternalControl.h
+new file mode 100644
+index 0000000..79f57e9
+--- /dev/null
++++ b/src/WallpaperEngine/Input/ExternalControl.h
+@@ -0,0 +1,28 @@
++#pragma once
++
++#include <glm/vec2.hpp>
++
++namespace WallpaperEngine::Input {
++/**
++ * Optional control channel on stdin (--control-stdin) for hosts that show the
++ * window somewhere it never receives real input, e.g. a GNOME Shell extension
++ * cloning it into the desktop background. One command per line:
++ *
++ *   m <x> <y>       pointer position in window coordinates (top-left origin)
++ *   b <l|r> <0|1>   button released/pressed
++ *   p <0|1>         resume/pause rendering
++ *   q               quit (EOF on stdin quits too, so the host dying never leaves orphans)
++ */
++class ExternalControl {
++public:
++    /** Starts the reader thread; called once when --control-stdin is given */
++    static void start ();
++    [[nodiscard]] static bool enabled ();
++    [[nodiscard]] static bool paused ();
++    [[nodiscard]] static bool quitRequested ();
++    /** Last pointer position in window coordinates (top-left origin) */
++    [[nodiscard]] static glm::dvec2 position ();
++    [[nodiscard]] static bool leftDown ();
++    [[nodiscard]] static bool rightDown ();
++};
++} // namespace WallpaperEngine::Input
+-- 
+2.53.0
+

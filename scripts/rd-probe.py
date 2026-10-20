@@ -3,7 +3,8 @@
 ScreenCast D-Bus APIs: take screenshots and inject pointer input.
 
 usage: rd-probe.py OUT_PREFIX [action ...]
-actions: shot:NAME  move:X,Y  click:X,Y  sleep:SEC  esc
+actions: shot:NAME  move:X,Y  click:X,Y  sleep:SEC  esc  fps:SEC (screencast frames/s =
+         how often the monitor actually repaints)
 Talks to the session bus in $DBUS_SESSION_BUS_ADDRESS (the nested one).
 """
 import os
@@ -95,6 +96,16 @@ def main():
             rd("NotifyKeyboardKeysym", "(ub)", (0xff1b, True))
             rd("NotifyKeyboardKeysym", "(ub)", (0xff1b, False))
             print("esc", flush=True)
+        elif kind == "fps":
+            # The stream only gets frames on damage, so this is the on-screen rate.
+            sec, n = float(arg), 0
+            while sink.emit("try-pull-sample", 0):
+                pass
+            end = time.time() + sec
+            while time.time() < end:
+                if sink.emit("try-pull-sample", 100 * Gst.MSECOND):
+                    n += 1
+            print(f"fps {n / sec:.1f}", flush=True)
         elif kind == "sleep":
             time.sleep(float(arg))
         elif kind in ("move", "click"):

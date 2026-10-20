@@ -45,6 +45,53 @@ sleep 3
 G=./target/release/wpe-gallery
 $G add-dir "${WPE_TEST_DIR:-$HOME/wpe-test}"
 $G list
+
+# WPE_SCENES="id1 id2 …" — scene wallpapers (linux-wallpaperengine) instead of
+# the web/video run: screenshot, on-screen FPS, CPU/GPU of the scene process,
+# pointer (parallax) via the control channel; for the first scene also
+# pause on a maximized window, property change (restart) and FPS limit.
+renderer_pid() {
+    gdbus call --session -d io.github.wpe.Daemon -o /io/github/wpe/Daemon -m io.github.wpe.Daemon1.GetRendererPids \
+        | grep -oE "uint32 [0-9]+" | head -1 | cut -d' ' -f2
+}
+if [ -n "${WPE_SCENES:-}" ]; then
+    first=1
+    for ID in $WPE_SCENES; do
+        echo "=== scene $ID"
+        $G set '*' "$ID"
+        sleep "${WPE_SCENE_WAIT:-12}"
+        PID=$(renderer_pid)
+        if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+            echo "scene $ID: NOT RUNNING"; continue
+        fi
+        python3 scripts/rd-probe.py "$OUT/scene-$ID-" sleep:1 click:800,450 sleep:1 click:1300,750 sleep:1.5 shot:1 fps:4 move:100,100 sleep:1.5 shot:2-mouse-tl move:1500,800 sleep:1.5 shot:3-mouse-br
+        python3 scripts/proc-usage.py "$PID" 5
+        if [ $first = 1 ]; then
+            first=0
+            GDK_BACKEND=wayland python3 scripts/maximized-window.py 9 &
+            MAXW=$!
+            sleep 3
+            echo "paused (maximized window):"; python3 scripts/proc-usage.py "$PID" 4
+            python3 scripts/rd-probe.py "$OUT/scene-$ID-" shot:4-maximized fps:2
+            wait $MAXW; sleep 1
+            echo "resumed:"; python3 scripts/rd-probe.py "$OUT/scene-$ID-" fps:2
+            $G fps 15; sleep "${WPE_SCENE_WAIT:-12}"
+            echo "fps limit 15 (new pid $(renderer_pid)):"; python3 scripts/rd-probe.py "$OUT/scene-$ID-" fps:4
+            python3 scripts/proc-usage.py "$(renderer_pid)" 4
+            $G fps 30
+            KEY=$($G props "$ID" | python3 -c 'import json,sys; p=[x for x in json.load(sys.stdin) if x["kind"]["type"]=="color"]; print(p[0]["key"] if p else "")')
+            if [ -n "$KEY" ]; then
+                $G prop "$ID" "$KEY" '"1 0 0"'; sleep "${WPE_SCENE_WAIT:-12}"
+                echo "property $KEY=1 0 0 -> pid $(renderer_pid)"
+                python3 scripts/rd-probe.py "$OUT/scene-$ID-" shot:5-prop-red
+            fi
+        fi
+    done
+    grep -E "^\[scene\]" "$OUT/daemon.log"
+    kill $DAEMON_PID; sleep 1; kill $SHELL_PID; wait
+    exit 0
+fi
+
 ID=${WPE_ID:-web-interactive}
 $G set '*' "$ID"
 sleep 6

@@ -16,6 +16,8 @@ pub enum RenderCmd {
     Pointer { monitor: String, x: f64, y: f64, kind: PointerKind, button: u32 },
     Pause { monitor: String, paused: bool },
     Volume { volume: f64, muted: bool },
+    /// Frame rate limit for scenes (restarts running scenes).
+    Fps(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +79,12 @@ impl Core {
         let mut roots = std::env::var_os("HOME")
             .map(|h| we_core::workshop_dirs(&PathBuf::from(h)))
             .unwrap_or_default();
+        // Built-in projects of the Wallpaper Engine app (mostly scenes).
+        if let Some(home) = std::env::var_os("HOME") {
+            for we in we_core::wallpaper_engine_dirs(&PathBuf::from(home)) {
+                roots.push(we.join("projects/defaultprojects"));
+            }
+        }
         roots.extend(local_wallpaper_dir());
         roots.extend(self.state.extra_dirs.iter().cloned());
         self.catalog = Catalog::scan(&roots);
@@ -133,6 +141,7 @@ impl Core {
     /// Re-send Show/Clear for every known monitor.
     pub fn apply_all(&mut self) {
         self.renderer.handle(RenderCmd::Volume { volume: self.state.volume, muted: self.state.muted });
+        self.renderer.handle(RenderCmd::Fps(self.state.fps));
         for m in self.monitors.clone() {
             self.apply_monitor(&m);
         }
@@ -162,6 +171,16 @@ impl Core {
         } else {
             self.apply_monitor(monitor);
         }
+        Ok(())
+    }
+
+    pub fn set_fps(&mut self, fps: u32) -> Result<(), String> {
+        if !(1..=240).contains(&fps) {
+            return Err(format!("fps must be 1..240, got {fps}"));
+        }
+        self.state.fps = fps;
+        self.persist();
+        self.renderer.handle(RenderCmd::Fps(fps));
         Ok(())
     }
 

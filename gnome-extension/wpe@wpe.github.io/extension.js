@@ -2,8 +2,10 @@
 //
 // WPE live wallpaper — GNOME Shell 50 extension.
 //
-// wpe-daemon opens one window per monitor titled "@wpe!<connector>". This
-// extension (approach of jeffshee/gnome-ext-hanabi):
+// wpe-daemon opens one window per monitor titled "@wpe!<connector>"; scene
+// wallpapers are rendered by linux-wallpaperengine subprocesses in their own
+// windows, matched by PID (GetRendererPids). This extension (approach of
+// jeffshee/gnome-ext-hanabi):
 //  * keeps those windows minimized and hides them from the overview, alt-tab,
 //    dock/app tracking;
 //  * puts a Clutter.Clone of the window into the desktop background actor of
@@ -37,8 +39,21 @@ const MOTION_INTERVAL_US = 16000; // ~60 Hz
 const FADE_MS = 600;
 
 const DEBUG = !!GLib.getenv('WPE_EXT_DEBUG');
-const isRenderer = w => !!w?.title?.startsWith(TITLE_PREFIX);
-const connectorOf = w => w.title.slice(TITLE_PREFIX.length);
+// PID -> connector of renderer processes with their own windows (scenes).
+const rendererPids = new Map();
+
+// The connector is remembered once a window is managed: a restarted scene's
+// old window stays a (hidden) renderer until it is gone.
+function connectorOf(w) {
+    if (!w)
+        return null;
+    if (w._wpeConnector)
+        return w._wpeConnector;
+    if (w.title?.startsWith(TITLE_PREFIX))
+        return w.title.slice(TITLE_PREFIX.length);
+    return rendererPids.get(w.get_pid?.()) ?? null;
+}
+const isRenderer = w => connectorOf(w) !== null;
 
 function log(msg) {
     console.log(`[wpe] ${msg}`);
@@ -84,6 +99,52 @@ function callDaemon(method, signature, args) {
                 // Daemon not running: ignore silently.
             }
         });
+}
+
+// Keeps rendererPids in sync with the daemon.
+class RendererPids {
+    constructor(onChanged) {
+        this._onChanged = onChanged;
+        this._signalId = 0;
+        this._watchId = 0;
+    }
+
+    enable() {
+        this._signalId = Gio.DBus.session.signal_subscribe(null, IFACE, 'RendererPidsChanged',
+            OBJECT_PATH, null, Gio.DBusSignalFlags.NONE, () => this._fetch());
+        this._watchId = Gio.bus_watch_name(Gio.BusType.SESSION, BUS_NAME, Gio.BusNameWatcherFlags.NONE,
+            () => this._fetch(), () => this._set({}));
+    }
+
+    disable() {
+        if (this._signalId)
+            Gio.DBus.session.signal_unsubscribe(this._signalId);
+        if (this._watchId)
+            Gio.bus_unwatch_name(this._watchId);
+        this._signalId = this._watchId = 0;
+        rendererPids.clear();
+    }
+
+    _fetch() {
+        Gio.DBus.session.call(BUS_NAME, OBJECT_PATH, IFACE, 'GetRendererPids', null,
+            new GLib.VariantType('(a{su})'), Gio.DBusCallFlags.NO_AUTO_START, -1, null,
+            (conn, res) => {
+                try {
+                    this._set(conn.call_finish(res).deepUnpack()[0]);
+                } catch (e) {
+                    // Older daemon or not running.
+                }
+            });
+    }
+
+    _set(pids) {
+        rendererPids.clear();
+        for (const [connector, pid] of Object.entries(pids))
+            rendererPids.set(pid, connector);
+        if (DEBUG)
+            log(`renderer pids ${JSON.stringify(pids)}`);
+        this._onChanged();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -213,13 +274,15 @@ class RendererWindows {
         for (const [w, ids] of this._windows) {
             ids.forEach(id => w.disconnect(id));
             this._release(w);
+            delete w._wpeConnector;
         }
         this._windows.clear();
     }
 
     // Meta.WindowActor of the renderer window for a monitor index
+    // Newest window first: while a scene restarts, its old window lingers briefly.
     actorForMonitor(index) {
-        for (const w of this._windows.keys()) {
+        for (const w of [...this._windows.keys()].reverse()) {
             if (monitorIndexForConnector(connectorOf(w)) === index) {
                 const actor = w.get_compositor_private();
                 if (actor)
@@ -230,7 +293,7 @@ class RendererWindows {
     }
 
     connectorForMonitor(index) {
-        for (const w of this._windows.keys()) {
+        for (const w of [...this._windows.keys()].reverse()) {
             if (monitorIndexForConnector(connectorOf(w)) === index)
                 return connectorOf(w);
         }
@@ -241,9 +304,16 @@ class RendererWindows {
         return [...this._windows.keys()].map(connectorOf);
     }
 
+    // Renderer PIDs changed: pick up scene windows that already exist.
+    rescan() {
+        for (const w of global.display.list_all_windows())
+            this._maybeManage(w);
+    }
+
     _maybeManage(w) {
         if (!w || !isRenderer(w) || this._windows.has(w))
             return;
+        w._wpeConnector = connectorOf(w);
         log(`managing renderer window for ${connectorOf(w)} (monitor ${monitorIndexForConnector(connectorOf(w))})`);
         const ids = [];
         ids.push(w.connect('notify::minimized', () => this._enforce(w)));
@@ -255,6 +325,7 @@ class RendererWindows {
         ids.push(w.connect('unmanaged', () => {
             ids.forEach(id => w.disconnect(id));
             this._windows.delete(w);
+            delete w._wpeConnector;
             this._onChanged();
         }));
         this._windows.set(w, ids);
@@ -560,11 +631,13 @@ export default class WpeExtension extends Extension {
         this._wallpapers = new Set();
         this._autoPause = null;
         this._renderers = new RendererWindows(() => this._autoPause?.queue());
+        this._pids = new RendererPids(() => this._renderers?.rescan());
         this._autoPause = new AutoPause(this._renderers);
         this._pointer = new PointerForwarder(this._renderers);
         this._installOverrides();
         this._filterAttention(true);
         this._renderers.enable();
+        this._pids.enable();
         this._pointer.enable();
         this._autoPause.enable();
         this._reloadBackgrounds();
@@ -573,12 +646,13 @@ export default class WpeExtension extends Extension {
     disable() {
         this._autoPause.disable();
         this._pointer.disable();
+        this._pids.disable();
         this._renderers.disable();
         this._injections.clear();
         this._injections = null;
         this._filterAttention(false);
         this._reloadBackgrounds();
-        this._autoPause = this._pointer = this._renderers = null;
+        this._autoPause = this._pointer = this._renderers = this._pids = null;
     }
 
     _installOverrides() {

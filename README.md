@@ -15,7 +15,8 @@
 | `wpe-daemon` без `gtk` | headless: D-Bus, каталог, state — для разработки GUI/расширения |
 | `wpe-gallery` | CLI (`list/scan/add-dir/set/props/prop/volume`); GUI — этап 3 |
 | `gnome-extension` | готово: окно рендерера → фон под всеми окнами (и в обзоре), скрыто из обзора/alt-tab/дока, курсор/клики с пустого рабочего стола (и поверх DING), пауза при maximized/fullscreen и блокировке |
-| сцены, аудиоспектр | этапы 2–3 |
+| сцены | этап 2 готов: linux-wallpaperengine (наш патч `--control-stdin`) в окне, найденном по PID, фоном; курсор/параллакс, пауза, свойства, FPS (`wpe-gallery fps 30`), звук выключен по умолчанию |
+| аудиоспектр, GUI-галерея | этап 3 |
 
 ## Зависимости (Ubuntu 26.04)
 
@@ -25,11 +26,20 @@ sudo apt install build-essential pkg-config git curl \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-gl gstreamer1.0-gtk4 \
   libpipewire-0.3-dev libspa-0.2-dev clang libclang-dev
-# сцены (этап 2), для сборки linux-wallpaperengine — сверить с его README:
+# сцены: сборка linux-wallpaperengine (проверено на Ubuntu 26.04)
 sudo apt install cmake libglfw3-dev libglew-dev libglm-dev libsdl2-dev liblz4-dev \
-  libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libmpv-dev libpulse-dev \
+  libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev libmpv-dev libpulse-dev \
   libfftw3-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxxf86vm-dev \
-  libwayland-dev wayland-protocols libxkbcommon-dev
+  libwayland-dev wayland-protocols libxkbcommon-dev libegl-dev libgl-dev libfreetype-dev \
+  libpng-dev libgmp-dev libffi-dev libdbus-1-dev libzstd-dev
+# freeglut3-dev апстрим требует, но не использует; наш патч делает GLUT необязательным
+```
+
+Для сцен нужен купленный Wallpaper Engine в Steam (его `assets/` и встроенные проекты находятся автоматически).
+Сборка и установка рендерера сцен (без sudo, ~15 мин, ~1.5 ГБ с CEF):
+
+```sh
+scripts/build-scene-renderer.sh     # → ~/.local/lib/linux-wallpaperengine, симлинк ~/.local/bin/linux-wallpaperengine
 ```
 
 Rust — через rustup (без sudo): `curl https://sh.rustup.rs -sSf | sh`.
@@ -43,6 +53,7 @@ cargo build --release -p wpe-daemon --features gtk
 cargo build --release -p wpe-gallery
 scripts/nested-test.sh                        # интеграционный тест в отдельной headless GNOME Shell
 WPE_SHELL_MODE=ubuntu WPE_MONITORS="1280x720 1024x768" scripts/nested-test.sh
+WPE_SCENES="beach 3582604159" scripts/nested-test.sh  # сцены: скриншоты, FPS, CPU/GPU, курсор, пауза, свойства
 ```
 
 `nested-test.sh` не трогает текущую сессию (свой D-Bus, GSettings в keyfile, свои `XDG_*`),

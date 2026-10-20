@@ -39,7 +39,7 @@
     `wallpaperPropertyListener.applyUserProperties({key:{type,value}})` (в т.ч. если листенер назначен после первой отправки),
     `applyGeneralProperties`, `setPaused`, `wallpaperRegisterAudioListener(cb)` (массив 128 float: 64 L + 64 R),
     `wallpaperRegisterPausedListener`, синтетические `mousemove/pointer*/mousedown/mouseup/click` по координатам от расширения.
-  * **Scene**: подпроцесс linux-wallpaperengine (см. ниже).
+  * **Scene**: подпроцесс linux-wallpaperengine (`scene.rs` — аргументы и протокол, `gtk_renderer.rs` — жизненный цикл), своего окна демон не создаёт. См. «Интеграция linux-wallpaperengine».
   * **Audio** (этап 3): `pipewire-rs`, захват монитора default sink (`stream.capture.sink=true`), окно 1024 сэмплов, FFT (`rustfft`), 64 логарифмические полосы на канал, нормализация + сглаживание как в WE, 30 Гц → `window.__wpe.audio([...])`. Только для обоев с `supportsaudioprocessing` и только если не на паузе.
 
 ### D-Bus API
@@ -60,9 +60,10 @@
 | `SetMonitors(as connectors)` | раскладка мониторов изменилась | расширение |
 | `SetVolume(d volume, b muted)` | | галерея |
 | `AddDirectory(s path)` | добавить каталог с обоями (сохраняется в `extra_dirs`), пересканировать | галерея |
-| *(этап 2)* `GetRendererPids() → a{su}` | PID процессов сцен, чтобы расширение нашло их окна | расширение |
+| `GetRendererPids() → a{su}` | монитор → PID процесса сцены, чтобы расширение нашло его окно; изменения — сигнал `RendererPidsChanged()` | расширение |
+| `SetFps(u fps)` / `GetFps() → u` | лимит FPS сцен (1..240, по умолчанию 30, в `state.json`), перезапускает сцены | галерея |
 
-Свойство `Version (s)`. Сигналы: `CatalogChanged()`, `AssignmentsChanged()`, `PropertiesChanged(s id)`.
+Свойство `Version (s)`. Сигналы: `CatalogChanged()`, `AssignmentsChanged()`, `PropertiesChanged(s id)`, `RendererPidsChanged()`.
 
 Демон стартует как systemd user unit (`wpe-daemon.service`, `PartOf=graphical-session.target`) и/или D-Bus activation.
 
@@ -70,7 +71,7 @@
 
 `gnome-extension/wpe@wpe.github.io/extension.js` — подход Hanabi (jeffshee/gnome-ext-hanabi), адаптированный и проверенный на Shell 50.1 (headless-сессия, см. «Тестирование»):
 
-1. **Поиск окон.** `window_manager::map`, `display::window-created` (+ `notify::title`): окна с заголовком `@wpe!<connector>`. Индекс монитора — `global.backend.get_monitor_manager().get_monitor_for_connector()`.
+1. **Поиск окон.** `window_manager::map`, `display::window-created` (+ `notify::title`): окна с заголовком `@wpe!<connector>` и окна процессов из `GetRendererPids` (`Meta.Window.get_pid()`; список обновляется по `RendererPidsChanged`, после чего уже открытые окна пересматриваются). Монитор запоминается в окне при захвате: старое окно перезапускаемой сцены остаётся скрытым до закрытия, а клон берёт самое новое окно монитора. Индекс монитора — `global.backend.get_monitor_manager().get_monitor_for_connector()`.
 2. **Окно в фон.** В `BackgroundManager._createBackgroundActor` (InjectionManager) в каждый фон монитора добавляется `St.Widget` с `Clutter.Clone` актёра окна рендерера. Фон есть и на рабочем столе, и в миниатюрах/рабочих столах обзора, поэтому обои видны везде. Экран блокировки не трогаем.
 3. **Как прячем настоящее окно.** *Не сворачиваем* (в отличие от Hanabi): Mutter 50 даёт свёрнутому окну xdg-toplevel `suspended`, GTK/WebKit перестают рисовать, клон замирает (проверено). Вместо этого окно остаётся отображённым: `stick()`, `lower()`, не `above`, а его `MetaWindowActor` скрыт (`hide()` + повторное скрытие на `notify::visible`). Клон рисует скрытый источник, Mutter продолжает слать frame callbacks — 60 FPS.
 4. **Геометрия.** Mutter автоматически подгоняет окно размером с монитор под рабочую область (док/панель: 1533×868 вместо 1600×900). Расширение делает `unmaximize()` + `move_resize_frame(user_op=true, геометрия монитора)` на `position-changed`/`size-changed`/`monitors-changed`, иначе клон растягивается и координаты курсора съезжают.
@@ -98,13 +99,19 @@ Wayland-ограничение: клиент не может сам стать �
 * Падение рендерера сцены (частое для экзотических шейдеров) не убивает демон и остальные мониторы.
 * Обновление апстрима — просто пересборка бинарника (подмодуль `third_party/linux-wallpaperengine`, пиннинг коммита).
 
-Этапы интеграции:
-* **2a**: запуск в оконном режиме (`--window <геометрия> --silent --fps N <путь>`; на Mutter его вывод `--screen-root` (wlr-layer-shell) недоступен). Окно находит расширение по PID и ставит в фон так же, как наши окна. Пауза — `SIGSTOP/SIGCONT`, громкость — `--volume`/`--silent`, свойства — `--set-property key=value` с перезапуском.
-* **2b** (если нужен ввод мыши и бесшовность): небольшой патч в форке — управляющий канал (stdin/unix-socket: координаты мыши, пауза, свойства) и, опционально, офскрин-вывод в DMA-BUF, который демон показывает через `GdkDmabufTextureBuilder` в своём окне (тогда отдельные окна сцен не нужны). Патч предлагать в апстрим.
+Как сделано (этап 2):
+* Сборка — `scripts/build-scene-renderer.sh`: апстрим, пиннинг коммита, наш патч `third_party/linux-wallpaperengine/0001-control-stdin.patch`, установка в `~/.local/lib/linux-wallpaperengine` (RPATH `$ORIGIN`, рядом рантайм CEF) + симлинк `~/.local/bin/linux-wallpaperengine`. Демон ищет бинарник в `$WPE_SCENE_BIN`, `~/.local/bin`, затем в `PATH` (у systemd user unit `~/.local/bin` в PATH обычно нет).
+* Запуск: `linux-wallpaperengine --control-stdin --no-fullscreen-pause --window 0x0x<W>x<H> --scaling fill --fps <N> --silent|--volume <0..100> --assets-dir <Steam>/common/wallpaper_engine/assets [--set-property key=value…] <каталог>`; `LC_NUMERIC=C` (значения парсятся `std::stof`). Свойства: bool → `1/0`, цвет `"r g b"`, числа и строки как есть, пустые файлы пропускаются. На Mutter нет wlr-layer-shell, поэтому `--screen-root` неприменим — оконный режим (GLFW, Wayland). Позиция окна игнорируется Wayland — её выставляет расширение.
+* Окно находит расширение по PID и ставит в фон так же, как наши окна (не сворачивается, полный размер монитора, скрытый актёр + клон).
+* Управляющий канал (патч `--control-stdin`, строки в stdin): `m x y` — курсор (координаты окна, от левого верхнего угла), `b l|r 0|1` — кнопки, `p 0|1` — пауза (цикл рендера спит, как при собственной fullscreen-паузе апстрима), `q` — выход; EOF тоже завершает процесс, так что падение демона не оставляет сирот. Почему не SIGSTOP: остановленный Wayland-клиент не отвечает на ping композитора («приложение не отвечает»), а при паузе процесс жив и отвечает. Курсор от расширения (`PointerEvent`) уходит в `GLFWMouseInput` вместо `glfwGetCursorPos`, поэтому параллакс и курсорные эффекты работают, хотя настоящее окно ввода не получает.
+* Свойства, громкость и FPS передаются только командной строкой → при изменении процесс перезапускается (старый получает `q`, через 3 с — SIGKILL, если не вышел). Упавший сам процесс снимается с монитора (лог `[scene] … exited`), на его месте — обычный фон GNOME.
+* Каталог: кроме Workshop сканируются встроенные проекты `<Steam>/common/wallpaper_engine/projects/defaultprojects` (`we_core::wallpaper_engine_dirs`).
+
+Дальше (не сделано): офскрин-вывод в DMA-BUF и показ в окне демона (`GdkDmabufTextureBuilder`) — убрал бы отдельные окна и перезапуски; изменение свойств без перезапуска через тот же канал; аудиоспектр для сцен.
 
 ## Этапы
 
 1. **MVP: Video + Web с интерактивом на фоне** — готово и проверено в headless GNOME Shell 50.1 на NVIDIA 580 (1 и 2 монитора, режимы `user` и `ubuntu` с DING): we-core, D-Bus API, GTK-рендерер Video/Web + шим, расширение (фон, скрытие окон, курсор/клики, пауза), CLI `wpe-gallery`, systemd user unit, `scripts/install.sh`.
-2. **Сцены**: сборка linux-wallpaperengine (подмодуль + скрипт), 2a, затем 2b.
+2. **Сцены** — готово (см. выше): сборка с патчем, подпроцесс в окне по PID, пауза/курсор через `--control-stdin`, свойства/FPS/громкость с перезапуском. Проверено в headless GNOME Shell на реальных сценах (`WPE_SCENES=… scripts/nested-test.sh`).
 3. **Аудио + галерея**: PipeWire → FFT → `wallpaperRegisterAudioListener`; libadwaita-галерея: сетка превью (GIF/JPG), фильтры по типу/тегам/поиск (`Catalog::search`), выбор монитора, редактор свойств, генерируемый по `PropertyKind` (color → `GtkColorDialogButton`, slider → `GtkScale`, combo → `AdwComboRow`, bool → `AdwSwitchRow`, text → `AdwEntryRow`, file/directory → `GtkFileDialog`), с учётом `condition` (простое вычисление `key.value == X`), локализация через `Project::localize`.
 4. Дальше: плейлисты, импорт `.pkg`/распаковка, автозапуск, энергосбережение (пауза на батарее), web-свойства `directory` (`wallpaperRequestRandomFileForProperty`).

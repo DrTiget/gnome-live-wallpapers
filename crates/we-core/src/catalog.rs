@@ -43,11 +43,21 @@ pub fn steam_library_folders(steam_root: &Path) -> Vec<PathBuf> {
 /// All existing `steamapps/workshop/content/431960` directories, deduplicated
 /// by canonical path (`~/.steam/steam` is usually a symlink).
 pub fn workshop_dirs(home: &Path) -> Vec<PathBuf> {
+    steam_app_dirs(home, |lib| lib.join("steamapps/workshop/content").join(WORKSHOP_APPID))
+}
+
+/// Existing `steamapps/common/wallpaper_engine` installs (the Wallpaper Engine
+/// app itself: `assets/` for scenes, `projects/defaultprojects/`).
+pub fn wallpaper_engine_dirs(home: &Path) -> Vec<PathBuf> {
+    steam_app_dirs(home, |lib| lib.join("steamapps/common/wallpaper_engine"))
+}
+
+fn steam_app_dirs(home: &Path, sub: impl Fn(&Path) -> PathBuf) -> Vec<PathBuf> {
     let mut seen = Vec::new();
     let mut out = Vec::new();
     for root in default_steam_roots(home) {
         for lib in steam_library_folders(&root) {
-            let d = lib.join("steamapps/workshop/content").join(WORKSHOP_APPID);
+            let d = sub(&lib);
             if let Ok(c) = d.canonicalize() {
                 if c.is_dir() && !seen.contains(&c) {
                     seen.push(c);

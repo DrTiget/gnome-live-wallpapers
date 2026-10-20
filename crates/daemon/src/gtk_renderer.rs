@@ -4,19 +4,26 @@
 //! shows a Clutter clone of it inside the desktop background actor of that
 //! monitor (Hanabi approach). Set `WPE_NOHIDE=1` to get normal decorated
 //! windows for debugging without the extension.
+//!
+//! Scenes are rendered by a linux-wallpaperengine subprocess in its own
+//! window; the extension finds that window by PID (GetRendererPids) and
+//! treats it like ours. Pointer and pause go to it over `--control-stdin`.
 
 use crate::core::{PointerKind, RenderCmd, Renderer};
 use gtk4::prelude::*;
 use gtk4::{glib, gio};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::process::Child;
+use std::io::Write;
+use std::process::{Child, ChildStdin, Stdio};
+use std::rc::Rc;
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use we_core::{Project, ProjectType};
 use webkit6::prelude::*;
 
 const SHIM: &str = include_str!("shim.js");
-use crate::webpath;
+use crate::{dbus, scene, webpath};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use webkit6::soup;
@@ -24,12 +31,44 @@ use webkit6::soup;
 enum Content {
     Video(gtk4::MediaFile),
     Web(webkit6::WebView),
-    /// linux-wallpaperengine subprocess (stage 2).
-    Scene(Child),
+    /// linux-wallpaperengine subprocess with its own window.
+    Scene(SceneProc),
+}
+
+struct SceneProc {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    root: PathBuf,
+    /// Cleared by the child watch once the process has exited (and was reaped).
+    alive: Rc<Cell<bool>>,
+}
+
+impl SceneProc {
+    fn send(&mut self, line: &str) {
+        if let Some(stdin) = &mut self.stdin {
+            if stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush()).is_err() {
+                self.stdin = None;
+            }
+        }
+    }
+
+    /// Ask it to quit (also implied by EOF on stdin); kill if it hangs.
+    fn stop(mut self) {
+        self.send("q\n");
+        self.stdin = None;
+        let SceneProc { mut child, alive, .. } = self;
+        glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || {
+            if alive.get() {
+                eprintln!("[scene] pid {} did not quit, killing", child.id());
+                let _ = child.kill();
+            }
+        });
+    }
 }
 
 struct Surface {
-    window: gtk4::ApplicationWindow,
+    /// Our window; `None` for scenes (the subprocess has its own).
+    window: Option<gtk4::ApplicationWindow>,
     wallpaper: String,
     content: Content,
 }
@@ -38,6 +77,7 @@ thread_local! {
     static SURFACES: RefCell<HashMap<String, Surface>> = RefCell::new(HashMap::new());
     static APP: RefCell<Option<gtk4::Application>> = const { RefCell::new(None) };
     static VOLUME: RefCell<(f64, bool)> = const { RefCell::new((0.5, true)) };
+    static FPS: Cell<u32> = const { Cell::new(crate::state::DEFAULT_FPS) };
     /// wpe:// host -> wallpaper root directory.
     static ROOTS: RefCell<HashMap<String, PathBuf>> = RefCell::new(HashMap::new());
     /// Latest applyUserProperties JSON per wallpaper id (re-sent after (re)loads).
@@ -77,11 +117,14 @@ pub fn set_application(app: &gtk4::Application) {
 
 fn close(monitor: &str) {
     SURFACES.with(|s| {
-        if let Some(mut surf) = s.borrow_mut().remove(monitor) {
-            if let Content::Scene(child) = &mut surf.content {
-                let _ = child.kill();
+        if let Some(surf) = s.borrow_mut().remove(monitor) {
+            if let Some(w) = surf.window {
+                w.destroy();
             }
-            surf.window.destroy();
+            if let Content::Scene(p) = surf.content {
+                dbus::set_renderer_pid(monitor, None);
+                p.stop();
+            }
         }
     });
 }
@@ -113,8 +156,16 @@ fn make_window(monitor: &str) -> gtk4::ApplicationWindow {
 
 fn show(monitor: String, project: Project) {
     close(&monitor);
-    let window = make_window(&monitor);
     let id = project.id();
+    if project.kind == ProjectType::Scene {
+        let props = project.properties.to_user_properties();
+        PROPS.with(|p| p.borrow_mut().insert(id.clone(), props.to_string()));
+        if let Some(p) = start_scene(&monitor, &project.root, &props) {
+            SURFACES.with(|s| s.borrow_mut().insert(monitor, Surface { window: None, wallpaper: id, content: Content::Scene(p) }));
+        }
+        return;
+    }
+    let window = make_window(&monitor);
     let content = match project.kind {
         ProjectType::Video => {
             let path = project.entry_path().expect("validated");
@@ -169,36 +220,87 @@ fn show(monitor: String, project: Project) {
             window.set_child(Some(&view));
             Content::Web(view)
         }
-        ProjectType::Scene => {
-            // Stage 2: see docs/ARCHITECTURE.md "Scene integration".
-            // Runs in window mode; the extension matches the window by PID
-            // (GetRendererPids, stage 2) and moves it into the background.
-            // TODO: check geometry syntax against `linux-wallpaperengine --help`.
-            let child = std::process::Command::new("linux-wallpaperengine")
-                .args(["--silent", "--fps", "30"])
-                .arg("--window")
-                .arg(monitor_geometry(&monitor).unwrap_or_else(|| "0x0x1920x1080".into()))
-                .arg(&project.root)
-                .spawn();
-            match child {
-                Ok(c) => Content::Scene(c),
-                Err(e) => {
-                    eprintln!("[scene] cannot start linux-wallpaperengine: {e}");
-                    return;
-                }
-            }
-        }
         _ => return,
     };
-    if !matches!(content, Content::Scene(_)) {
-        window.present();
-    }
-    SURFACES.with(|s| s.borrow_mut().insert(monitor, Surface { window, wallpaper: id, content }));
+    window.present();
+    SURFACES.with(|s| s.borrow_mut().insert(monitor, Surface { window: Some(window), wallpaper: id, content }));
 }
 
-fn monitor_geometry(connector: &str) -> Option<String> {
-    let g = gdk_monitor(connector)?.geometry();
-    Some(format!("{}x{}x{}x{}", g.x(), g.y(), g.width(), g.height()))
+fn start_scene(monitor: &str, root: &std::path::Path, props: &serde_json::Value) -> Option<SceneProc> {
+    let (width, height) = gdk_monitor(monitor)
+        .map(|m| (m.geometry().width(), m.geometry().height()))
+        .unwrap_or((1920, 1080));
+    let (volume, muted) = VOLUME.with(|v| *v.borrow());
+    let opts = scene::SceneOptions { width, height, fps: FPS.get(), volume, muted, assets: scene::assets_dir() };
+    let bin = scene::binary();
+    let args = scene::command_args(root, props, &opts);
+    if std::env::var_os("WPE_DEBUG").is_some() {
+        eprintln!("[scene] {} {:?}", bin.display(), args);
+    }
+    let mut child = match std::process::Command::new(&bin)
+        .args(&args)
+        // Property values (std::stof) and shaders must not see a comma decimal separator.
+        .env("LC_NUMERIC", "C")
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[scene] cannot start {}: {e} (build it with scripts/build-scene-renderer.sh)", bin.display());
+            return None;
+        }
+    };
+    let pid = child.id();
+    eprintln!("[scene] {monitor}: pid {pid} {}", root.display());
+    let alive = Rc::new(Cell::new(true));
+    let (alive2, mon) = (alive.clone(), monitor.to_string());
+    glib::child_watch_add_local(glib::Pid(pid as i32), move |_, status| {
+        alive2.set(false);
+        eprintln!("[scene] {mon}: pid {pid} exited, status {status}");
+        let current = SURFACES.with(|s| {
+            matches!(s.borrow().get(&mon), Some(Surface { content: Content::Scene(p), .. }) if p.child.id() == pid)
+        });
+        if current {
+            // Crashed on its own: forget it, the desktop falls back to the normal background.
+            SURFACES.with(|s| s.borrow_mut().remove(&mon));
+            dbus::set_renderer_pid(&mon, None);
+        }
+    });
+    let mut p = SceneProc { stdin: child.stdin.take(), child, root: root.to_path_buf(), alive };
+    if PAUSED.with(|p| p.borrow().contains(monitor)) {
+        p.send(scene::pause_line(true));
+    }
+    dbus::set_renderer_pid(monitor, Some(pid));
+    Some(p)
+}
+
+/// Restart scene subprocesses (new properties, fps or volume); `only` limits it to one wallpaper.
+fn restart_scenes(only: Option<&str>) {
+    let targets: Vec<(String, String)> = SURFACES.with(|s| {
+        s.borrow()
+            .iter()
+            .filter(|(_, surf)| matches!(surf.content, Content::Scene(_)) && only.map_or(true, |w| w == surf.wallpaper))
+            .map(|(m, surf)| (m.clone(), surf.wallpaper.clone()))
+            .collect()
+    });
+    for (monitor, wallpaper) in targets {
+        let Some(Surface { content: Content::Scene(old), .. }) = SURFACES.with(|s| s.borrow_mut().remove(&monitor)) else {
+            continue;
+        };
+        let root = old.root.clone();
+        old.stop();
+        let props = PROPS
+            .with(|p| p.borrow().get(&wallpaper).cloned())
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or(serde_json::Value::Null);
+        match start_scene(&monitor, &root, &props) {
+            Some(p) => SURFACES.with(|s| s.borrow_mut().insert(monitor, Surface { window: None, wallpaper, content: Content::Scene(p) })),
+            None => {
+                dbus::set_renderer_pid(&monitor, None);
+                None
+            }
+        };
+    }
 }
 
 /// Call into the shim; a no-op while the page (and thus the shim) is not loaded yet.
@@ -281,16 +383,23 @@ fn handle_main(cmd: RenderCmd) {
     match cmd {
         RenderCmd::Show { monitor, project } => show(monitor, *project),
         RenderCmd::Clear { monitor } => close(&monitor),
-        RenderCmd::Properties { wallpaper, user_properties } => SURFACES.with(|s| {
-            PROPS.with(|p| p.borrow_mut().insert(wallpaper.clone(), user_properties.to_string()));
-            for surf in s.borrow().values().filter(|s| s.wallpaper == wallpaper) {
-                if let Content::Web(v) = &surf.content {
-                    web_js(v, &format!("window.__wpe.applyUserProperties({user_properties});"));
+        RenderCmd::Properties { wallpaper, user_properties } => {
+            let new = user_properties.to_string();
+            let changed = PROPS.with(|p| p.borrow_mut().insert(wallpaper.clone(), new.clone())) != Some(new);
+            SURFACES.with(|s| {
+                for surf in s.borrow().values().filter(|s| s.wallpaper == wallpaper) {
+                    if let Content::Web(v) = &surf.content {
+                        web_js(v, &format!("window.__wpe.applyUserProperties({user_properties});"));
+                    }
                 }
+            });
+            // linux-wallpaperengine takes properties on the command line only.
+            if changed {
+                restart_scenes(Some(&wallpaper));
             }
-        }),
-        RenderCmd::Pointer { monitor, x, y, kind, button } => SURFACES.with(|s| {
-            if let Some(Surface { content: Content::Web(v), .. }) = s.borrow().get(&monitor) {
+        }
+        RenderCmd::Pointer { monitor, x, y, kind, button } => SURFACES.with(|s| match s.borrow_mut().get_mut(&monitor) {
+            Some(Surface { content: Content::Web(v), .. }) => {
                 let k = match kind {
                     PointerKind::Motion => "motion",
                     PointerKind::Press => "press",
@@ -298,6 +407,8 @@ fn handle_main(cmd: RenderCmd) {
                 };
                 web_js(v, &format!("window.__wpe.pointer('{k}',{x},{y},{button});"));
             }
+            Some(Surface { content: Content::Scene(p), .. }) => p.send(&scene::pointer_lines(kind, x, y, button)),
+            _ => {}
         }),
         RenderCmd::Pause { monitor, paused } => SURFACES.with(|s| {
             PAUSED.with(|p| {
@@ -308,19 +419,22 @@ fn handle_main(cmd: RenderCmd) {
                     p.remove(&monitor);
                 }
             });
-            if let Some(surf) = s.borrow().get(&monitor) {
-                match &surf.content {
+            if let Some(surf) = s.borrow_mut().get_mut(&monitor) {
+                match &mut surf.content {
                     Content::Video(m) => m.set_playing(!paused),
                     Content::Web(v) => web_js(v, &format!("window.__wpe.setPaused({paused});")),
-                    Content::Scene(c) => {
-                        let sig = if paused { "-STOP" } else { "-CONT" };
-                        let _ = std::process::Command::new("kill").arg(sig).arg(c.id().to_string()).status();
-                    }
+                    // Not SIGSTOP: a stopped Wayland client can't answer compositor pings.
+                    Content::Scene(p) => p.send(scene::pause_line(paused)),
                 }
             }
         }),
+        RenderCmd::Fps(fps) => {
+            if FPS.replace(fps) != fps {
+                restart_scenes(None);
+            }
+        }
         RenderCmd::Volume { volume, muted } => {
-            VOLUME.with(|v| *v.borrow_mut() = (volume, muted));
+            let old = VOLUME.with(|v| v.replace((volume, muted)));
             SURFACES.with(|s| {
                 for surf in s.borrow().values() {
                     match &surf.content {
@@ -332,7 +446,10 @@ fn handle_main(cmd: RenderCmd) {
                         Content::Scene(_) => {}
                     }
                 }
-            })
+            });
+            if old != (volume, muted) {
+                restart_scenes(None);
+            }
         }
     }
 }

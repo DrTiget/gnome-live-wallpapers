@@ -12,7 +12,7 @@ mod lenient;
 mod project;
 mod property;
 
-pub use catalog::{default_steam_roots, steam_library_folders, workshop_dirs, Catalog, ScanError, WORKSHOP_APPID};
+pub use catalog::{default_steam_roots, steam_library_folders, wallpaper_engine_dirs, workshop_dirs, Catalog, ScanError, WORKSHOP_APPID};
 pub use error::{Error, Result};
 pub use project::{Project, ProjectType, ValidationIssue};
 pub use property::{ComboOption, Properties, Property, PropertyKind, PropertyValue};

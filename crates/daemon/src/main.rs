@@ -1,5 +1,7 @@
 mod core;
 mod dbus;
+#[cfg_attr(not(feature = "gtk"), allow(dead_code))]
+mod scene;
 mod state;
 #[cfg_attr(not(feature = "gtk"), allow(dead_code))]
 mod webpath;
@@ -13,6 +15,7 @@ fn serve(core: Arc<Mutex<core::Core>>) -> zbus::Result<zbus::blocking::Connectio
         .name(dbus::BUS_NAME)?
         .serve_at(dbus::OBJECT_PATH, dbus::Service { core })?
         .build()
+        .inspect(|conn| dbus::set_connection(conn.clone()))
 }
 
 #[cfg(not(feature = "gtk"))]
