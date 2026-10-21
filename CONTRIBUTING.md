@@ -10,4 +10,6 @@ Issue и pull request'ы приветствуются.
    (`journalctl --user -u wpe-daemon`).
 5. Не добавляйте в репозиторий обои из Workshop (чужие авторские права), секреты и личные пути.
 
+6. Автор всех коммитов — DrTiget. Не указывайте ИИ-ассистентов (Claude, ChatGPT, Codex, Copilot и т. п.) автором или соавтором: никаких `Co-Authored-By`, «Generated with …» и подобных строк в коммитах, PR и файлах проекта.
+
 Лицензия вклада — GPL-3.0-or-later.
